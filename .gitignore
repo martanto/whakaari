@@ -7,4 +7,5 @@ plots/
 controller/
 _tmp/
 .vscode/
+.idea/
 *.png
