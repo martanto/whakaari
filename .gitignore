@@ -9,3 +9,5 @@ _tmp/
 .vscode/
 .idea/
 *.png
+/download
+/input

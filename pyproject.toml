@@ -1,0 +1,41 @@
+[build-system]
+requires = ["flit_core>=3.4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name =  "whakaari"
+version = "0.0.1"
+authors = [
+    {name = "David Dempsey", email = "d.dempsey@auckland.ac.nz"},
+]
+maintainers = [
+    {name = "Martanto", email = "martanto@live.com"},
+]
+description = "Whakaari Forecast Modelling"
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = ["whakaari", "forecast", "modelling"]
+requires-python = ">=3.7.6"
+
+dependencies = [
+    "tsfresh==0.13.0",
+    "imbalanced-learn==0.6.1",
+    "scikit-learn==0.22",
+    "obspy==1.1.0",
+    "corner==2.0.1",
+    "joblib==0.14.0",
+    "numpy==1.18.1",
+    "pandas==0.25.3",
+    "scipy==1.3.1",
+    "statsmodels==0.10.2",
+]
+
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/martanto/whakaari"
+Issues = "https://github.com/martanto/whakaari/issues"
