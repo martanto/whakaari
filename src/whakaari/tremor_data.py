@@ -8,7 +8,7 @@ from typing import List
 
 import numpy as np
 import pandas as pd
-from obspy import UTCDateTime
+from obspy import UTCDateTime, Stream, read
 from obspy.clients.fdsn import Client as FDSNClient
 from obspy.clients.fdsn.header import FDSNException, FDSNNoDataException
 from obspy.io.mseed import ObsPyMSEEDFilesizeTooSmallError
@@ -20,7 +20,7 @@ from .utils import to_datetime, load_dataframe, find_outliers, compute_rsam, com
 STATIONS = {
     'WIZ': {
         'client_name': "GEONET",
-        'nrt_name': 'https://service-nrt.geonet.org.nz',
+        'nrt_name': 'https://service.geonet.org.nz',
         'channel': 'HHZ',
         'network': 'NZ',
         'location': '*',
@@ -172,6 +172,8 @@ class TremorData:
             print(f'Cols: {self.cols}')
 
         self.client = FDSNClient()
+
+        # NRT = Near Real-time
         self.client_nrt = FDSNClient()
         self._validate()
 
@@ -221,10 +223,6 @@ class TremorData:
         parallels = [[index, datetime_start_obj, self.station] for index in range(n_days)]
         n_jobs = self.n_jobs if n_jobs is None else n_jobs
 
-        if self.verbose:
-            print(f'Parallels :')
-            print(parallels)
-
         if n_jobs == 1:
             print('=' * 60)
             print(f'Station {self.station}: Downloading data in serial')
@@ -244,11 +242,15 @@ class TremorData:
             p.join()
 
         # Read temporary files in as dataframes for concatenation with existing data
-        cols = self.cols
-        dfs = [self.df[cols]]
+        if self.verbose:
+            print(f'ℹ️ Reading to temporary file')
+
+        dfs = []
         for index_file in range(n_days):
-            filepath = os.path.join(self.tmp_dir, '_tmp/_tmp_fl_{:05d}.csv'.format(index_file))
+            filepath = os.path.join(self.tmp_dir, '_tmp_fl_{:05d}.csv'.format(index_file))
             if not os.path.isfile(filepath):
+                if self.verbose:
+                    print(f'⚠️ Temporary file not found in {filepath}')
                 continue
 
             dfs.append(load_dataframe(filepath, index_col=0, parse_dates=True, infer_datetime_format=True))
@@ -258,10 +260,17 @@ class TremorData:
                 print(f'Cleaning up temp dir: {self.tmp_dir}')
             shutil.rmtree(self.tmp_dir)
 
-        self.df = pd.concat(dfs)
+        if len(dfs) == 0:
+            raise ValueError(f'❌ update:: Cannot get data from temporary dir ({self.tmp_dir})')
+
+        if len(dfs) == 1:
+            df = dfs[0]
+        else:
+            print(f'Length DFS :: {len(dfs)}')
+            df = pd.concat(dfs, sort=False)
 
         # Impute missing data using linear interpolation and save file
-        df = self.df.loc[~self.df.index.duplicated(keep='last')]
+        df = df.loc[~df.index.duplicated(keep='last')]
         filename, filetype = self.tremor_file.split('\\')[-1].split('.')
         save_path = os.path.join(os.getcwd(), f'{filename}_nitp.{filetype}')
         save_dataframe(df, save_path, index=True)
@@ -308,19 +317,25 @@ class TremorData:
 
         return stream.traces[0].data
 
-    def get_data_for_day(self, index: int, date: datetime, station: str):
-        _date = UTCDateTime(date)
-        day_second = 24 * 3600
-        freq_bands = [[0.01, 0.1], [0.1, 2], [2, 5], [4.5, 8], [8, 16]]
-        band_names = self.BAND_NAMES
-        frs = [200, 200, 200, 100, 50]
-
-        frequency = 100
-        decimation = 1
+    def download(self, index: int, utc_datetime: UTCDateTime, station: str, frequency: float = 100.0) -> Stream:
         _station = self.stations[station]
 
+        _date = utc_datetime
+        day_second = 24 * 3600
+
+        download_dir = os.path.join(os.getcwd(), 'download')
+        os.makedirs(download_dir, exist_ok=True)
+
+        date_str = _date.strftime('%Y-%m-%d')
+        filepath = os.path.join(download_dir, f"{_station['network']}_{station}_{date_str}_{index}")
+
+        if os.path.isfile(filepath):
+            if self.verbose:
+                print(f'✅ File exists :: {filepath}')
+            return read(filepath, format='MSEED')
+
         if self.verbose:
-            print(f"✍️ Checking FDSN Client connection using {_station['client_name']} and {_station['nrt_name']}")
+            print(f"✍️ Checking FDSN Client connection using {_station['client_name']} from {_station['nrt_name']}")
 
         attempts = 0
         while attempts < 10:
@@ -342,15 +357,17 @@ class TremorData:
         client = self.client
         client_nrt = self.client_nrt
 
+        # Download instrument response
         try:
-            site = client.get_stations(starttime=_date + (index * day_second), endtime=_date + ((index + 1) * day_second),
-                                       station=station, level="response", channel=_station['channel'])
+            inventory = client.get_stations(starttime=_date + (index * day_second),
+                                            endtime=_date + ((index + 1) * day_second),
+                                            station=station, level="response", channel=_station['channel'])
 
         except (FDSNNoDataException, FDSNException) as e:
             print(f'⚠️ Failed to download inventory')
-            site = None
+            inventory = None
 
-        if site is not None:
+        if inventory is not None:
             print(f'🛖 Inventory Downloaded')
 
         pad_f = 0.1
@@ -364,61 +381,77 @@ class TremorData:
             end_date = _date + ((index + 1 + pad_f) * day_second)
 
             # print(network, station, location, channel, start_date, end_date)
-
             st = client.get_waveforms(network, station, location, channel,
                                       start_date, end_date)
 
-            download_dir = os.path.join(os.getcwd(), 'download')
-            os.makedirs(download_dir, exist_ok=True)
-
-            date_str = date.strftime('%Y-%m-%d')
-
-            st.write(os.path.join(download_dir, f'{network}_{station}_{date_str}_{index}'), format='MSEED')
-
-            data = self.get_data_from_stream(st, site)
-            if data is None:
-                print(f'❌ Data not found.')
-                return
-            else:
-                print(f'✅ Stream downloaded')
-            # if less than 1 day of data, try different client
-            _len = 600 * frequency
-            if len(data) < _len:
-                raise FDSNNoDataException(f'❌ get_data_for_day :: Data length less than {_len}')
-
+            data = self.get_data_from_stream(st, inventory)
         except (ValueError, ObsPyMSEEDFilesizeTooSmallError, FDSNNoDataException, FDSNException) as e:
             print(f'⌛ Downloading using Client Failed. Try to use NRT')
             try:
                 st = client_nrt.get_waveforms(_station['network'], station, _station['location'], _station['channel'],
                                               _date + (index - pad_f) * day_second,
                                               _date + (index + 1 + pad_f) * day_second)
-                data = self.get_data_from_stream(st, site)
+                data = self.get_data_from_stream(st, inventory)
             except (FDSNNoDataException, ValueError, FDSNException) as e:
                 raise ConnectionError(f'❌ Failed to download using NRT :: {e}')
 
+        if data is None:
+            print(f'❌ Data not found.')
+            return Stream()
+        else:
+            print(f'✅ Stream downloaded')
+
+        # if less than 1 day of data, try different client
+        _len = 600 * frequency
+        if len(data) < _len:
+            raise FDSNNoDataException(f'❌ get_data_for_day :: Data length less than {_len}')
+
+        st.write(filepath, format='MSEED')
+
+        return st
+
+    def get_data_for_day(self, index: int, date: datetime, station: str):
+        _date = UTCDateTime(date)
+        day_second = 24 * 3600
+        freq_bands = [[0.01, 0.1], [0.1, 2], [2, 5], [4.5, 8], [8, 16]]
+        band_names = self.BAND_NAMES
+        frs = [200, 200, 200, 100, 50]
+
+        frequency = 100
+        decimation = 1
+
+        # Download using FDSN
+        st = self.download(index, _date, station)
+        if len(st) == 0:
+            return None
+
+        # Pre-processing stream
         if decimation > 1:
             st.decimate(decimation)
             frequency = frequency // decimation
 
-        data = st.traces[0]
+        trace = st.traces[0]
 
+        # Checking data length
         i0 = int((_date + (index * day_second) - st.traces[0].meta['starttime']) * frequency) + 1
 
-        if i0 < 0 or i0 >= len(data):
+        if i0 < 0 or i0 >= len(trace.data):
             if self.verbose:
                 print(
                     f'get_data_for_day :: The data length is not valid. i0 value is {i0} '
-                    f'and data length is {len(data)}')
+                    f'and data length is {len(trace)}')
             return None
 
+        # Ensuring data length for one day downloaded is not over 24 * 3600 * frequency
         i1 = int(24 * 3600 * frequency)
-        if (i0 + i1) > len(data):
-            i1 = len(data)
+        if (i0 + i1) > len(trace):
+            i1 = len(trace)
         else:
             i1 += i0
 
         # Process frequency bands
-        data_i = cumtrapz(data, dx=1. / frequency, initial=0)
+        # Integrate velocity to displacement
+        data_i = cumtrapz(trace, dx=1. / frequency, initial=0)
         data_i -= data_i[i0]
 
         start_time = st.traces[0].meta['starttime'] + timedelta(seconds=(i0 + 1) / frequency)
@@ -435,7 +468,7 @@ class TremorData:
         _datas = []
         _data_is = []
         for (freq_min, freq_max), fr in zip(freq_bands, frs):
-            _data = abs(bandpass(data, freq_min, freq_max, frequency)[i0:i1]) * 1.e9
+            _data = abs(bandpass(trace, freq_min, freq_max, frequency)[i0:i1]) * 1.e9
             _data_i = abs(bandpass(data_i, freq_min, freq_max, frequency)[i0:i1]) * 1.e9
             _datas.append(_data)
             _data_is.append(_data_i)
@@ -453,15 +486,15 @@ class TremorData:
         data_rsam, columns_rsam = compute_rsam(_datas, band_names=band_names, m=m, n=n, outliers=outliers,
                                                max_idxs=max_idxs, asymmetry_factor=asymmetry_factor,
                                                sub_domain_range=sub_domain_range)
-        datas.append(data_rsam)
-        columns.append(columns_rsam)
+        datas += data_rsam
+        columns += columns_rsam
 
         # Compute dsar (w/ EQ filter)
         data_dsar, column_dsar = compute_dsar(_data_is, ratio_names=self.RATIO_NAMES, m=m, n=n, outliers=outliers,
                                               max_idxs=max_idxs, asymmetry_factor=asymmetry_factor,
                                               sub_domain_range=sub_domain_range)
-        datas.append(data_dsar)
-        columns.append(column_dsar)
+        datas += data_dsar
+        columns += column_dsar
 
         # Write out temporary file
         datas = np.array(datas)
