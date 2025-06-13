@@ -243,7 +243,7 @@ class TremorData:
 
         # Read temporary files in as dataframes for concatenation with existing data
         if self.verbose:
-            print(f'ℹ️ Reading to temporary file')
+            print(f'ℹ️ Reading to temporary file(s) from {self.tmp_dir}')
 
         dfs = []
         for index_file in range(n_days):
@@ -370,7 +370,7 @@ class TremorData:
         if inventory is not None:
             print(f'🛖 Inventory Downloaded')
 
-        pad_f = 0.1
+        pad_f = 0.01
         try:
             print(f'⌛ Downloading using Client')
 
@@ -380,7 +380,9 @@ class TremorData:
             start_date = _date + ((index - pad_f) * day_second)
             end_date = _date + ((index + 1 + pad_f) * day_second)
 
-            # print(network, station, location, channel, start_date, end_date)
+            print(f'Datetime Start :: {start_date}')
+            print(f'Datetime End :: {end_date}')
+
             st = client.get_waveforms(network, station, location, channel,
                                       start_date, end_date)
 
@@ -461,12 +463,12 @@ class TremorData:
 
         start_time = start_time_day + int(np.round((start_time - start_time_day) / 600)) * 600
 
-        n = 600 * frequency  # 10 minutes windows in seconds
+        n = 60 * 10 * frequency  # Number of samples in 10 minutes
         m = (i1 - i0) // n  # number of windows
 
         # Apply filters and remove filter response
-        _datas = []
-        _data_is = []
+        _datas = []  # Trace data
+        _data_is = [] # Displacement data
         for (freq_min, freq_max), fr in zip(freq_bands, frs):
             _data = abs(bandpass(trace, freq_min, freq_max, frequency)[i0:i1]) * 1.e9
             _data_i = abs(bandpass(data_i, freq_min, freq_max, frequency)[i0:i1]) * 1.e9
