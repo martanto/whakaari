@@ -256,17 +256,17 @@ class TremorData:
         if n_jobs == 1:
             print("=" * 60)
             print(f"Station {self.station}: Downloading data in serial")
-            print("=" * 60)
             for parallel in parallels:
                 progress = str(parallel[0] + 1) + "/" + str(len(parallels))
+                print("=" * 60)
                 print(f"⌚ Progress :: {progress}")
                 self.get_data_for_day(*parallel)
-                print("=" * 60)
         else:
+            print("=" * 60)
             print(f"Station {self.station}: Downloading data in parallel")
             print("From: " + str(datetime_start_obj))
             print("To: " + str(datetime_end_obj))
-            print("\n")
+            print("=" * 60)
             p = Pool(n_jobs)
             p.starmap(self.get_data_for_day, parallels)
             p.close()
@@ -308,12 +308,16 @@ class TremorData:
         # Impute missing data using linear interpolation and save a file
         df = df.loc[~df.index.duplicated(keep="last")]
         filename, filetype = self.tremor_file.split("\\")[-1].split(".")
-        save_path = os.path.join(os.getcwd(), f"{filename}_nitp.{filetype}")
+
+        output_dir = os.path.join(os.getcwd(), "output")
+        os.makedirs(output_dir, exist_ok=True)
+
+        save_path = os.path.join(output_dir, f"{filename}_nitp.{filetype}")
         save_dataframe(df, save_path, index=True)
 
         df.index = pd.to_datetime(df.index)
         self.df = df.resample("10T").interpolate("linear")
-        save_interpolate_path = os.path.join(os.getcwd(), f"{filename}.{filetype}")
+        save_interpolate_path = os.path.join(output_dir, f"{filename}.{filetype}")
         save_dataframe(self.df, save_interpolate_path, index=True)
 
         self.datetime_start = self.df.index[0]
