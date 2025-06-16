@@ -51,7 +51,7 @@ def load_dataframe(
     skiprows=None,
 ) -> pd.DataFrame:
     if filename.endswith(".csv"):
-        print(f"Reading from CSV file: {filename}")
+        print(f"📖 Reading from CSV file: {filename}")
         return pd.read_csv(
             filename,
             index_col=index_col,

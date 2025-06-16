@@ -215,14 +215,14 @@ class TremorData:
     def update(
         self, datetime_start: str = None, datetime_end: str = None, n_jobs: int = None
     ):
-        """Return tremor data in requested date range.
+        """Return tremor data in the requested date range.
 
-        :param datetime_start: start date of tremor data
+        :param datetime_start: Start date of tremor data
         :param datetime_end: end date of tremor data
         :param n_jobs: number of parallel jobs
         :return: DataFrame with tremor data
 
-        :type datetime_start: str
+        :type datetime_start: Str
         :type datetime_end: str
         :type n_jobs: int
         :rtype: pd.DataFrame
@@ -259,8 +259,9 @@ class TremorData:
             print("=" * 60)
             for parallel in parallels:
                 progress = str(parallel[0] + 1) + "/" + str(len(parallels))
-                print(f"⌚ {progress}")
+                print(f"⌚ Progress :: {progress}")
                 self.get_data_for_day(*parallel)
+                print("=" * 60)
         else:
             print(f"Station {self.station}: Downloading data in parallel")
             print("From: " + str(datetime_start_obj))
@@ -272,9 +273,6 @@ class TremorData:
             p.join()
 
         # Read temporary files in as dataframes for concatenation with existing data
-        if self.verbose:
-            print(f"ℹ️ Reading to temporary file(s) from {self.tmp_dir}")
-
         dfs = []
         for index_file in range(n_days):
             filepath = os.path.join(
@@ -307,22 +305,24 @@ class TremorData:
             print(f"Length DFS :: {len(dfs)}")
             df = pd.concat(dfs, sort=False)
 
-        # Impute missing data using linear interpolation and save file
+        # Impute missing data using linear interpolation and save a file
         df = df.loc[~df.index.duplicated(keep="last")]
         filename, filetype = self.tremor_file.split("\\")[-1].split(".")
         save_path = os.path.join(os.getcwd(), f"{filename}_nitp.{filetype}")
         save_dataframe(df, save_path, index=True)
 
-        if self.verbose:
-            print(f"Imputing dataframe saved to : {save_path}")
-
         df.index = pd.to_datetime(df.index)
         self.df = df.resample("10T").interpolate("linear")
-
         save_interpolate_path = os.path.join(os.getcwd(), f"{filename}.{filetype}")
         save_dataframe(self.df, save_interpolate_path, index=True)
+
         self.datetime_start = self.df.index[0]
         self.datetime_end = self.df.index[-1]
+
+        if self.verbose:
+            print(f"💾 Dataframe saved to : {save_interpolate_path}")
+            print(f"📅 Start Date: {self.datetime_start}")
+            print(f"📅 End Date: {self.datetime_end}")
 
     def _probe_start(self):
         if self.verbose:
@@ -474,10 +474,8 @@ class TremorData:
         if data is None:
             print(f"❌ Data not found.")
             return Stream()
-        else:
-            print(f"✅ Stream downloaded")
 
-        # if less than 1 day of data, try different client
+        # if less than 1 day of data, try a different client
         _len = 600 * frequency
         if len(data) < _len:
             raise FDSNNoDataException(
@@ -485,6 +483,7 @@ class TremorData:
             )
 
         st.write(filepath, format="MSEED")
+        print(f"✅ Stream saved to :: {filepath}")
 
         return st
 
@@ -504,6 +503,9 @@ class TremorData:
             return None
 
         # Pre-processing stream
+        if self.verbose:
+            print(f"📶 Pre-processing data, apply filter...")
+
         if decimation > 1:
             st.decimate(decimation)
             frequency = frequency // decimation
@@ -543,7 +545,7 @@ class TremorData:
             seconds=(i0 + 1) / frequency
         )
 
-        # Round start time to nearest 10 min increment
+        # Round start time to the nearest 10 min increment
         start_time_day = UTCDateTime(
             f"{start_time.year}-{start_time.month}-{start_time.day} 00:00:00"
         )
@@ -576,6 +578,9 @@ class TremorData:
         sub_domain_range = n // number_sub_domains  # No. data points per subDomain
 
         # Compute rsam and other bands (w/ EQ filter)
+        if self.verbose:
+            print(f"🧮 Computing RSAM ...")
+
         data_rsam, columns_rsam = compute_rsam(
             _datas,
             band_names=band_names,
@@ -590,6 +595,9 @@ class TremorData:
         columns += columns_rsam
 
         # Compute dsar (w/ EQ filter)
+        if self.verbose:
+            print(f"🧮 Computing DSAR ...")
+
         data_dsar, column_dsar = compute_dsar(
             _data_is,
             ratio_names=self.RATIO_NAMES,
@@ -603,7 +611,7 @@ class TremorData:
         datas += data_dsar
         columns += column_dsar
 
-        # Write out temporary file
+        # Write out a temporary file
         datas = np.array(datas)
         time = [
             (start_time + datas_index * 600).datetime
@@ -613,15 +621,16 @@ class TremorData:
 
         csv_path = os.path.join(self.tmp_dir, "_tmp_fl_{:05d}.csv".format(index))
         save_dataframe(df, csv_path, index=True, index_label="time")
+        return None
 
     def _validate(self):
         """
-        Load existing file and check date range of data.
+        Load an existing file and check the date range of data.
         """
         with open(self.eruptive_file, "r") as fp:
             self.tes = [to_datetime(_line.rstrip()) for _line in fp.readlines()]
 
-        # Check if tremor data file exists. If not, create one
+        # Check if a tremor data file exists. If not, create one
         if not self.tremor_file_exists:
             if self.verbose:
                 print(f"Creating new tremor data...")
