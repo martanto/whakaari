@@ -14,6 +14,7 @@ from obspy.clients.fdsn.header import FDSNException, FDSNNoDataException
 from obspy.io.mseed import ObsPyMSEEDFilesizeTooSmallError
 from obspy.signal.filter import bandpass
 from scipy.integrate import cumtrapz
+from scipy.signal import stft
 
 from .utils import (
     to_datetime,
@@ -126,7 +127,7 @@ class TremorData:
     def __init__(
         self,
         station: str,
-        parent: str = None,
+        parent=None,
         data_dir: str = None,
         eruptive_file: str = None,
         n_jobs: int = 2,
@@ -558,6 +559,13 @@ class TremorData:
     def get_data_for_day(
         self, index: int, date: datetime, station: str, sds_dir: str = None
     ) -> None:
+        # Skip for temporary file already exists
+        csv_path = os.path.join(self.tmp_dir, "_tmp_fl_{:05d}.csv".format(index))
+        if os.path.isfile(csv_path):
+            if self.verbose:
+                print(f"✅ Temp file exists :: {csv_path}")
+            return None
+
         _date = UTCDateTime(date)
         day_second = 24 * 3600
         freq_bands = self.freq_bands
@@ -700,9 +708,152 @@ class TremorData:
         ]
         df = pd.DataFrame(zip(*datas), columns=columns, index=pd.Series(time))
 
-        csv_path = os.path.join(self.tmp_dir, "_tmp_fl_{:05d}.csv".format(index))
         save_dataframe(df, csv_path, index=True, index_label="time")
         return None
+
+    def _check_transform(self, name) -> bool:
+        if name not in self.df.columns and name in self.parent.data_streams:
+            return True
+        else:
+            return False
+
+    def compute_transforms(self):
+        for col in self.df.columns:
+            if col is "time":
+                continue
+
+            # inverse
+            if self._check_transform("inv_" + col):
+                self.df["inv_" + col] = 1.0 / self.df[col]
+
+            # diff
+            if self._check_transform("diff_" + col):
+                self.df["diff_" + col] = self.df[col].diff()
+                self.df["diff_" + col][0] = 0.0
+
+            # log
+            if self._check_transform("log_" + col):
+                self.df["log_" + col] = np.log10(self.df[col])
+
+            # stft
+            if self._check_transform("stft_" + col):
+                seg, freq = [12, 16]
+                data = pd.Series(np.zeros(seg * 6 - 1))
+                data = data.append(self.df[col], ignore_index=True)
+                z = abs(
+                    stft(
+                        data.values,
+                        window="nuttall",
+                        nperseg=seg * 6,
+                        noverlap=seg * 6 - 1,
+                        boundary=None,
+                    )[2]
+                )
+                self.df["stft_" + col] = np.mean(z[freq : freq + 2, :], axis=0)
+
+            if self._check_transform("zsc_" + col):
+                # log data
+                dt = np.log10(self.df[col]).replace([np.inf, -np.inf], np.nan).dropna()
+
+                # Drop test data
+                if len(self.parent.exclude_dates) != 0:
+                    for exclude_date_range in self.parent.exclude_dates:
+                        t0, t1 = [to_datetime(date) for date in exclude_date_range]
+                        inds = (dt.index < t0) | (dt.index >= t1)
+                        dt = dt.loc[inds]
+
+                # Record mean/std/min
+                mn = np.mean(dt)
+                std = np.std(dt)
+                min_z_score = np.min(dt)
+
+                # Calculate percentile
+                self.df["zsc_" + col] = (np.log10(self.df[col]) - mn) / std
+                # self.df['zsc_'+col]=(self.df[col]-mn)/std
+                self.df["zsc_" + col] = self.df["zsc_" + col].fillna(min_z_score)
+                self.df["zsc_" + col] = 10 ** self.df["zsc_" + col]
+            if self._check_transform("zsc2_" + col):
+                # log data
+                dt = np.log10(self.df[col]).replace([np.inf, -np.inf], np.nan).dropna()
+
+                # Drop test data
+                if len(self.parent.exclude_dates) != 0:
+                    for exclude_date_range in self.parent.exclude_dates:
+                        t0, t1 = [to_datetime(date) for date in exclude_date_range]
+                        inds = (dt.index < t0) | (dt.index >= t1)
+                        dt = dt.loc[inds]
+
+                # Record mean/std/min
+                mn = np.mean(dt)
+                std = np.std(dt)
+                min_z_score = np.min(dt)
+
+                # Calculate percentile
+                self.df["zsc2_" + col] = (np.log10(self.df[col]) - mn) / std
+                # self.df['zsc_'+col]=(self.df[col]-mn)/std
+                self.df["zsc2_" + col] = self.df["zsc2_" + col].fillna(min_z_score)
+                self.df["zsc2_" + col] = 10 ** self.df["zsc2_" + col]
+
+                self.df["zsc2_" + col] = self.df["zsc2_" + col].rolling(window=2).min()
+                self.df["zsc2_" + col][0] = self.df["zsc2_" + col][1]
+            if self._check_transform("log_zsc2_" + col):
+                # log data
+                dt = np.log10(self.df[col]).replace([np.inf, -np.inf], np.nan).dropna()
+
+                # Drop test data
+                if len(self.parent.exclude_dates) != 0:
+                    for exclude_date_range in self.parent.exclude_dates:
+                        t0, t1 = [to_datetime(date) for date in exclude_date_range]
+                        inds = (dt.index < t0) | (dt.index >= t1)
+                        dt = dt.loc[inds]
+
+                # Record mean/std/min
+                mn = np.mean(dt)
+                std = np.std(dt)
+                min_z_score = np.min(dt)
+
+                # Calculate percentile
+                self.df["log_zsc2_" + col] = (np.log10(self.df[col]) - mn) / std
+
+                # self.df['zsc_'+col]=(self.df[col]-mn)/std
+                self.df["log_zsc2_" + col] = self.df["log_zsc2_" + col].fillna(
+                    min_z_score
+                )
+                self.df["log_zsc2_" + col] = 10 ** self.df["log_zsc2_" + col]
+                self.df["log_zsc2_" + col] = (
+                    self.df["log_zsc2_" + col].rolling(window=2).min()
+                )
+                self.df["log_zsc2_" + col] = np.log10(self.df["log_zsc2_" + col])
+                self.df["log_zsc2_" + col][0] = self.df["log_zsc2_" + col][1]
+            if self._check_transform("diff_zsc2_" + col):
+
+                # log data
+                dt = np.log10(self.df[col]).replace([np.inf, -np.inf], np.nan).dropna()
+
+                # Drop test data
+                if len(self.parent.exclude_dates) != 0:
+                    for exclude_date_range in self.parent.exclude_dates:
+                        t0, t1 = [to_datetime(date) for date in exclude_date_range]
+                        inds = (dt.index < t0) | (dt.index >= t1)
+                        dt = dt.loc[inds]
+
+                # Record mean/std/min
+                mn = np.mean(dt)
+                std = np.std(dt)
+                min_z_score = np.min(dt)
+
+                # Calculate percentile
+                self.df["diff_zsc2_" + col] = (np.log10(self.df[col]) - mn) / std
+                # self.df['zsc_'+col]=(self.df[col]-mn)/std
+                self.df["diff_zsc2_" + col] = self.df["diff_zsc2_" + col].fillna(
+                    min_z_score
+                )
+                self.df["diff_zsc2_" + col] = 10 ** self.df["diff_zsc2_" + col]
+                self.df["diff_zsc2_" + col] = (
+                    self.df["diff_zsc2_" + col].rolling(window=2).min()
+                )
+                self.df["diff_zsc2_" + col] = self.df[col].diff()
+                self.df["diff_zsc2_" + col][0] = 0.0
 
     def _validate(self):
         """
