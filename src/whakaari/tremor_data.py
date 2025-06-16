@@ -138,7 +138,16 @@ class TremorData:
         self.verbose = verbose
         self.station = station
         self.parent = parent
+
         self._stations = STATIONS
+        self._freq_bands: List[List[float]] = [
+            [0.01, 0.1],
+            [0.1, 2],
+            [2, 5],
+            [4.5, 8],
+            [8, 16],
+        ]
+        self._channel = "*"
 
         self.data_dir = data_dir
         if data_dir is None:
@@ -205,6 +214,22 @@ class TremorData:
             return "no data"
 
     @property
+    def freq_bands(self) -> List[List[float]]:
+        return self._freq_bands
+
+    @freq_bands.setter
+    def freq_bands(self, freq_bands: List[List[float]]):
+        self._freq_bands = freq_bands
+
+    @property
+    def channel(self) -> str:
+        return self._channel
+
+    @channel.setter
+    def channel(self, channel: str):
+        self._channel = channel
+
+    @property
     def stations(self):
         return self._stations
 
@@ -213,18 +238,24 @@ class TremorData:
         self._stations = stations
 
     def update(
-        self, datetime_start: str = None, datetime_end: str = None, n_jobs: int = None
+        self,
+        datetime_start: str = None,
+        datetime_end: str = None,
+        n_jobs: int = None,
+        sds_dir: str = None,
     ):
         """Return tremor data in the requested date range.
 
         :param datetime_start: Start date of tremor data
         :param datetime_end: end date of tremor data
         :param n_jobs: number of parallel jobs
+        :sds_dir: directory to save tremor data
         :return: DataFrame with tremor data
 
         :type datetime_start: Str
         :type datetime_end: str
         :type n_jobs: int
+        :type sds_dir: str
         :rtype: pd.DataFrame
         """
         os.makedirs(self.tmp_dir, exist_ok=True)
@@ -249,7 +280,8 @@ class TremorData:
         n_days = (datetime_end_obj - datetime_start_obj).days
 
         parallels = [
-            [index, datetime_start_obj, self.station] for index in range(n_days)
+            [index, datetime_start_obj, self.station, sds_dir]
+            for index in range(n_days)
         ]
         n_jobs = self.n_jobs if n_jobs is None else n_jobs
 
@@ -491,10 +523,44 @@ class TremorData:
 
         return st
 
-    def get_data_for_day(self, index: int, date: datetime, station: str):
+    def download_from_sds(
+        self, sds_dir: str, utc_datetime: UTCDateTime, station: str
+    ) -> Stream:
+        year = utc_datetime.year
+        julian_day = utc_datetime.strftime("%j")
+        stations = self.stations[station]
+        network = stations["network"]
+        location = stations["location"]
+        channel = stations["channel"]
+        channel_type = "D"
+
+        filename = f"{network}.{station}.{location}.{channel}.{channel_type}.{year}.{julian_day}"
+
+        # SDS Path
+        miniseed_file = os.path.join(
+            sds_dir,
+            str(year),
+            network,
+            station,
+            f"{channel}.{channel_type}",
+            filename,
+        )
+
+        # Checking file exists
+        if not os.path.isfile(miniseed_file):
+            print(f"❌ File not found :: {miniseed_file}")
+            return Stream()
+
+        # Load miniseed
+        st = read(miniseed_file, format="MSEED")
+        return st
+
+    def get_data_for_day(
+        self, index: int, date: datetime, station: str, sds_dir: str = None
+    ) -> None:
         _date = UTCDateTime(date)
         day_second = 24 * 3600
-        freq_bands = [[0.01, 0.1], [0.1, 2], [2, 5], [4.5, 8], [8, 16]]
+        freq_bands = self.freq_bands
         band_names = self.BAND_NAMES
         frs = [200, 200, 200, 100, 50]
 
@@ -502,13 +568,20 @@ class TremorData:
         decimation = 1
 
         # Download using FDSN
-        st = self.download(index, _date, station)
+        if sds_dir is None:
+            st = self.download(index, _date, station)
+        else:
+            # Need to be modifed
+            st = self.download_from_sds(sds_dir, _date + timedelta(index), station)
+
         if len(st) == 0:
             return None
 
         # Pre-processing stream
         if self.verbose:
             print(f"📶 Pre-processing data, apply filter...")
+
+        st = st.merge(method="interpolate")
 
         if decimation > 1:
             st.decimate(decimation)
@@ -545,9 +618,13 @@ class TremorData:
         data_i = cumtrapz(trace, dx=1.0 / frequency, initial=0)
         data_i -= data_i[i0]
 
-        start_time = st.traces[0].meta["starttime"] + timedelta(
-            seconds=(i0 + 1) / frequency
-        )
+        start_time = st.traces[0].meta["starttime"]
+        if sds_dir is None:
+            start_time = st.traces[0].meta["starttime"] + timedelta(
+                seconds=(i0 + 1) / frequency
+            )
+
+        print(f"Start time : {start_time}")
 
         # Round start time to the nearest 10 min increment
         start_time_day = UTCDateTime(
