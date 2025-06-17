@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import List
+from typing import List, Self
 from .tremor_data import TremorData
 from .utils import to_datetime
 from datetime import timedelta
@@ -164,3 +164,48 @@ class ForecastModel:
             print(f"Model dir: {self.model_dir}")
             print(f"Feature dir: {self.feature_dir}")
             print(f"Prediction dir: {self.prediction_dir}")
+
+    def train(
+        self,
+        start_date: str,
+        end_date: str,
+        number_of_significant_features: int = 20,
+        number_of_classifiers: int = 500,
+        retrain: bool = False,
+        classifier: str = "DT",
+        random_seed: int = 0,
+        drop_features: list = None,
+        n_jobs: int = 2,
+        excludes_dates: List[List[str]] = None,
+        method: float = 0.75,
+    ) -> Self:
+        """Construct classifier models.
+
+        Args:
+            start_date (str): Start date of the model.
+            end_date (str): End date of the model.
+            number_of_significant_features (int): Number of significant features.
+            number_of_classifiers (int): Number of classifiers.
+            retrain (bool): Whether to retrain model or not. Defaults to False.
+            classifier (str): Classifier name. Defaults to "DT".
+            random_seed (int): Random seed. Defaults to 0.
+            drop_features (list): List of feature names to drop. Defaults to None.
+            n_jobs (int): Number of jobs. Defaults to 2.
+            excludes_dates (List[List[str]): List of dates to exclude features. Example: [['2012-06-01','2012-08-01'],
+                ['2015-01-01','2016-01-01']] will drop Jun-Aug 2012 and 2015-2016 from analysis. Defaults to None.
+            method (float): Method to use for feature selection. Defaults to 0.75.
+
+            Classifier options:
+            -------------------
+            SVM - Support Vector Machine.
+            KNN - k-Nearest Neighbors
+            DT - Decision Tree
+            RF - Random Forest
+            NN - Neural Network
+            NB - Naive Bayes
+            LR - Logistic Regression
+
+        Returns:
+            self (Self): Self
+        """
+        return self
