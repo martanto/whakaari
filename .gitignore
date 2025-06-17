@@ -12,3 +12,4 @@ _tmp/
 /download
 /input
 /output
+*.csv

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from typing import List
 from .tremor_data import TremorData
@@ -14,20 +16,27 @@ class ForecastModel:
         window: float,
         overlap: float,
         look_forward: float,
-        eruptive_file: str = None,
+        eruptive_file: str,
+        tremor_data_file: str = None,
         data_streams: List[str] = None,
         exclude_dates: List[str] = None,
         root: str = None,
+        feature_root: str = None,
+        feature_dir: str = None,
         n_jobs: int = 2,
         savefile_type="pkl",
+        verbose: bool = False,
     ):
         if data_streams is None:
             data_streams = ["rsam", "mf", "hf", "dsar"]
 
+        self.verbose = verbose
         self.station = station
         self.data_streams = data_streams
         self.exclude_dates = exclude_dates
-        self.look_forward = look_forward
+
+        # Length of look-forward in days
+        self.look_forward: float = look_forward
         self.savefile_type = savefile_type
 
         self.data: TremorData = TremorData(
@@ -35,6 +44,7 @@ class ForecastModel:
             parent=self,
             data_dir=os.getcwd(),
             eruptive_file=eruptive_file,
+            tremor_data_file=tremor_data_file,
         )
 
         if any([column not in self.data.df.columns for column in data_streams]):
@@ -78,12 +88,6 @@ class ForecastModel:
         # Length between data samples (10 minutes).
         self.dt = timedelta(seconds=600)
 
-        # Length of window.
-        dtw = timedelta(days=window)
-
-        # Length of non-overlapping section of window
-        self.dto = (1.0 - overlap) * dtw
-
         # Number of samples in window.
         self.iw = int(window * 6 * 24)
 
@@ -101,7 +105,11 @@ class ForecastModel:
         if self.start_date_model - self.dtw < self.data.datetime_start:
             self.start_date_model = self.data.datetime_start + self.dtw
 
+        # Fraction of overlap between adjacent windows. Set this to 1.
+        # For overlap of entire window minus 1 data point.
         self.overlap = self.io * 1.0 / self.iw
+
+        # Length of non-overlapping section of window
         self.dto = (1.0 - self.overlap) * self.dtw
 
         self.drop_features = []
@@ -113,10 +121,46 @@ class ForecastModel:
 
         # naming convention and file system attributes
         if root is None:
-            root = "fm_{:3.2f}wndw_{:3.2f}ovlp_{:3.2f}lkfd".format(
-                self.window, self.overlap, self.look_forward
+            root = (
+                f"fm_{self.window:3.2f}_{self.overlap:3.2f}_{self.look_forward:3.2f}_"
             )
-            root += "_" + ((("{:s}-") * len(self.data_streams))[:-1]).format(
+            root += (("{:s}-" * len(self.data_streams))[:-1]).format(
                 *sorted(self.data_streams)
             )
         self.root = root
+
+        self.feature_root = feature_root
+        self.root_dir = os.getcwd()
+
+        self.output_dir = os.path.join(self.root_dir, "output")
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        self.plot_dir = os.path.join(self.output_dir, "plots", self.root)
+        os.makedirs(self.plot_dir, exist_ok=True)
+
+        self.model_dir = os.path.join(self.output_dir, "models", self.root)
+        os.makedirs(self.model_dir, exist_ok=True)
+
+        if feature_dir is None:
+            feature_dir = os.path.join(self.output_dir, "features")
+        self.feature_dir = feature_dir
+        os.makedirs(self.feature_dir, exist_ok=True)
+
+        self.feature_file = lambda feature_name, ds: os.path.join(
+            feature_dir,
+            f"fm_{window:3.2f}w_{ds}_{station}{feature_name}.{savefile_type}",
+        )
+
+        self.prediction_dir = os.path.join(self.output_dir, "predictions", self.root)
+        os.makedirs(self.prediction_dir, exist_ok=True)
+
+        if verbose:
+            print(f"Start date: {self.start_date_model.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"End date: {self.end_date_model.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Tremor data: {self.data.tremor_file}")
+            print(f"Root dir: {self.root_dir}")
+            print(f"Output dir: {self.output_dir}")
+            print(f"Plot dir: {self.plot_dir}")
+            print(f"Model dir: {self.model_dir}")
+            print(f"Feature dir: {self.feature_dir}")
+            print(f"Prediction dir: {self.prediction_dir}")

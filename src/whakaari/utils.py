@@ -70,7 +70,7 @@ def load_dataframe(
     elif filename.endswith(".hdf"):
         df = pd.read_hdf(filename, "test")
     else:
-        raise ValueError("Only csv and pkl file formats supported")
+        raise ValueError("Only CSV and pkl file formats supported")
 
     if usecols is not None:
         if len(usecols) == 1 and usecols[0] == df.index.name:
@@ -158,7 +158,7 @@ def find_outliers(data: List, n: int, m: int) -> Tuple[List[bool], List[int]]:
 
 
 def wrapped_indices(
-    max_idx: int, asymmetry_factor: float, sub_domain_range: int, n: float | int
+    max_idx: int, asymmetry_factor: float, sub_domain_range: int, n: int
 ) -> List[int]:
     """Wrapped indices based on asymmetry factor and subdomain range.
 
@@ -199,19 +199,19 @@ def wrapped_indices(
 
 def compute_rsam(
     data: List,
-    band_names: list[str],
+    band_names: List[str],
     m: int,
     n: int,
     outliers: List[bool],
     max_idxs: List[int],
     asymmetry_factor: float,
     sub_domain_range: int,
-) -> tuple[list, list]:
+) -> Tuple[list, list]:
     """Calculates RSAM (w/ EQ filter).
 
     Args:
         data (list): Data
-        band_names (list[str]): Band names
+        band_names (list): Band names
         m (int): Number of data
         n (int): Number windows
         outliers (list[bool]): List of indices of outliers.
@@ -260,7 +260,7 @@ def compute_dsar(
     max_idxs: List[int],
     asymmetry_factor: float,
     sub_domain_range: int,
-) -> tuple[list, list]:
+) -> Tuple[list, list]:
     """Compute DSAR (w/ EQ filter)"""
     datas = []
     columns = []

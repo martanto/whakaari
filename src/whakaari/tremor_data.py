@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import shutil
 import whakaari
@@ -130,6 +132,7 @@ class TremorData:
         parent=None,
         data_dir: str = None,
         eruptive_file: str = None,
+        tremor_data_file: str = None,
         n_jobs: int = 2,
         cleanup_tmp_dir: bool = False,
         verbose: bool = False,
@@ -157,9 +160,11 @@ class TremorData:
         self.n_jobs = n_jobs
 
         # Originally self.file
-        self.tremor_file = os.path.join(
-            data_dir, "input", f"{self.station}_tremor_data.csv"
-        )
+        if tremor_data_file is None:
+            tremor_data_file = os.path.join(
+                data_dir, "output", f"{self.station}_tremor_data.csv"
+            )
+        self.tremor_file = tremor_data_file
         self.tremor_file_exists = os.path.isfile(self.tremor_file)
 
         self.eruptive_file = eruptive_file
@@ -253,7 +258,7 @@ class TremorData:
         :sds_dir: directory to save tremor data
         :return: DataFrame with tremor data
 
-        :type datetime_start: Str
+        :type datetime_start: str
         :type datetime_end: str
         :type n_jobs: int
         :type sds_dir: str
@@ -263,10 +268,11 @@ class TremorData:
 
         if datetime_start is None:
             if self.datetime_end is not None:
+                _datetime_end = to_datetime(self.datetime_end)
                 datetime_start = datetime(
-                    self.datetime_end.year,
-                    self.datetime_end.month,
-                    self.datetime_end.day,
+                    _datetime_end.year,
+                    _datetime_end.month,
+                    _datetime_end.day,
                     0,
                     0,
                     0,
@@ -391,7 +397,7 @@ class TremorData:
             except Exception as e:
                 if self.verbose:
                     print(
-                        "get_data_from_stream :: Failed to merge traces. Try to interpolate."
+                        f"get_data_from_stream :: Failed to merge traces. Try to interpolate. {e}"
                     )
                 stream = (
                     stream.interpolate(100).merge(fill_value="interpolate").traces[0]
@@ -465,7 +471,7 @@ class TremorData:
             )
 
         except (FDSNNoDataException, FDSNException) as e:
-            print(f"⚠️ Failed to download inventory")
+            print(f"⚠️ Failed to download inventory :: {e}")
             inventory = None
 
         if inventory is not None:
@@ -494,7 +500,9 @@ class TremorData:
             FDSNNoDataException,
             FDSNException,
         ) as e:
-            print(f"⌛ Downloading using Client Failed. Try to use NRT")
+            print(
+                f"⌛ Downloading using Client Failed. Try to use NRT (Near Real-Time) Client. {e}"
+            )
             try:
                 st = client_nrt.get_waveforms(
                     _station["network"],
@@ -883,3 +891,8 @@ class TremorData:
                 print(f"Dataframe loaded: {self.df.shape}")
                 print(f"Start date: {self.datetime_start}")
                 print(f"End date: {self.datetime_end}")
+
+            return None
+
+        print(f"⚠️ Data not found in tremor file :: {self.tremor_file}")
+        return None
