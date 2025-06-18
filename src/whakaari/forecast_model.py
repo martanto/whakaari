@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-import os
-from typing import List, Self
+import os, gc
+import pandas as pd
+import numpy as np
+from glob import glob
+from typing import List, Self, Tuple
 from .tremor_data import TremorData
-from .utils import to_datetime
-from datetime import timedelta
+from .utils import to_datetime, get_classifier, load_dataframe, save_dataframe
+from datetime import datetime, timedelta
+from tsfresh import extract_features
+from tsfresh.utilities.dataframe_functions import impute
+from tsfresh.feature_extraction.settings import ComprehensiveFCParameters
 
 
 class ForecastModel:
@@ -62,8 +68,8 @@ class ForecastModel:
         self.end_date = end_date
 
         # Originally self.ti_model and self.tf_model
-        self.start_date_model = to_datetime(start_date)
-        self.end_date_model = to_datetime(end_date)
+        self.start_date_model: datetime = to_datetime(start_date)
+        self.end_date_model: datetime = to_datetime(end_date)
 
         if self.end_date_model > self.data.datetime_end:
             t0, t1 = [
@@ -154,6 +160,17 @@ class ForecastModel:
         self.prediction_dir = os.path.join(self.output_dir, "predictions", self.root)
         os.makedirs(self.prediction_dir, exist_ok=True)
 
+        # Defining outside init
+        self.classifier = "DT"
+        self.use_features = None
+        self.number_of_classifiers = 500
+        self.start_date_train = None
+        self.end_date_train = None
+        self.start_date_previous = None
+        self.end_date_previous = None
+        self.feature_matrix = pd.DataFrame()
+        self.label_vector = pd.DataFrame()
+
         if verbose:
             print(f"Start date: {self.start_date_model.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"End date: {self.end_date_model.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -176,8 +193,9 @@ class ForecastModel:
         random_seed: int = 0,
         drop_features: list = None,
         n_jobs: int = 2,
-        excludes_dates: List[List[str]] = None,
+        exclude_dates: List[List[str]] = None,
         method: float = 0.75,
+        use_features: List[str] = None,
     ) -> Self:
         """Construct classifier models.
 
@@ -186,14 +204,15 @@ class ForecastModel:
             end_date (str): End date of the model.
             number_of_significant_features (int): Number of significant features.
             number_of_classifiers (int): Number of classifiers.
-            retrain (bool): Whether to retrain model or not. Defaults to False.
+            retrain (bool): Whether to keep the model or not. Defaults to False.
             classifier (str): Classifier name. Defaults to "DT".
             random_seed (int): Random seed. Defaults to 0.
             drop_features (list): List of feature names to drop. Defaults to None.
             n_jobs (int): Number of jobs. Defaults to 2.
-            excludes_dates (List[List[str]): List of dates to exclude features. Example: [['2012-06-01','2012-08-01'],
+            exclude_dates (List[List[str]): List of dates to exclude features. Example: [['2012-06-01','2012-08-01'],
                 ['2015-01-01','2016-01-01']] will drop Jun-Aug 2012 and 2015-2016 from analysis. Defaults to None.
             method (float): Method to use for feature selection. Defaults to 0.75.
+            use_features (List[str]): List of features to use for feature selection. Defaults to None.
 
             Classifier options:
             -------------------
@@ -208,4 +227,410 @@ class ForecastModel:
         Returns:
             self (Self): Self
         """
+        self.classifier = classifier
+        self.exclude_dates = exclude_dates
+        self.use_features = use_features
+        self.n_jobs = n_jobs
+
+        # Originally named as Ncl
+        self.number_of_classifiers = number_of_classifiers
+
+        # initialise training interval
+        self.start_date_train: datetime = (
+            self.start_date_model if start_date is None else to_datetime(start_date)
+        )
+        self.end_date_train: datetime = (
+            self.end_date_model if end_date is None else to_datetime(end_date)
+        )
+        if self.start_date_train - self.dtw < self.data.datetime_start:
+            self.start_date_train = self.data.datetime_start + self.dtw
+
+        # check if any model training required
+        run_models = False
+        if not retrain:
+            model, _grids = get_classifier(self.classifier)
+            prefix = type(model).__name__
+            for classifier_index in range(number_of_classifiers):
+                model_path = os.path.join(
+                    self.model_dir, f"{prefix}_{classifier_index:04d}.pkl"
+                )
+                if not os.path.isfile(model_path):
+                    run_models = True
+            if not run_models:
+                return self
+        else:
+            # delete old model files
+            _ = [os.remove(fl) for fl in glob("{:s}/*".format(self.model_dir))]
+
+        # get feature matrix and label vector
+        feature_matrix, label_vector = self._load_data()
+
         return self
+
+    def _load_data(self, year: int = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        # Return pre loaded
+        start_date: datetime = self.start_date_train
+        end_date: datetime = self.end_date_train
+
+        try:
+            if (
+                start_date == self.start_date_previous
+                and end_date == self.end_date_previous
+            ):
+                return self.feature_matrix, self.label_vector
+        except AttributeError:
+            pass
+
+        # range checking
+        if end_date > self.data.datetime_end:
+            raise ValueError(
+                "❌ Model end date '{:s}' beyond data range '{:s}'".format(
+                    end_date, self.data.datetime_end
+                )
+            )
+        if start_date < self.data.datetime_start:
+            raise ValueError(
+                "❌ Model start date '{:s}' predates data range '{:s}'".format(
+                    start_date, self.data.datetime_start
+                )
+            )
+
+        date_range = [start_date, end_date]
+        if year is None:
+            date_range = [
+                datetime(*[_year, 1, 1, 0, 0, 0])
+                for _year in list(range(start_date.year + 1, end_date.year + 1))
+            ]
+            if start_date - self.dtw < self.data.datetime_start:
+                start_date = self.data.datetime_start + self.dtw
+            date_range.insert(0, start_date)
+            date_range.append(end_date)
+
+        _feature_matrix = []
+        _label_vector = []
+
+        for data_stream in self.data_streams:
+            i = 0
+            fMa = []
+            ysa = []
+            for t0, t1 in zip(date_range[:-1], date_range[1:]):
+                fMi, ysi = self._extract_features(t0, t1 - self.dt, data_stream, year)
+                i += 1
+                if i == 2:
+                    pass
+                fMa.append(fMi)
+                ysa.append(ysi)
+            fMa = pd.concat(fMa)
+            ysa = pd.concat(ysa)
+            _feature_matrix.append(fMa)
+            _label_vector.append(ysa)
+
+        # concat list of fM and ysa
+        _feature_matrix = pd.concat(_feature_matrix, axis=1, sort=False)
+        _label_vector = pd.concat(_label_vector)
+
+        return pd.DataFrame(), pd.DataFrame()
+
+    def _extract_features(
+        self, start_date: datetime, end_date: datetime, data_stream, year=None
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Extract features from windowed data.
+
+        Notes:
+        ------
+        Saves feature matrix to $rootdir/features/$root_features.csv to avoid recalculation.
+        """
+        # number of windows in feature request
+        # orginally Nw
+        number_of_windows = (
+            int(np.floor(((end_date - start_date) / self.dt) / (self.iw - self.io))) + 1
+        )
+
+        # max number of construct windows per iteration (6*24*30 windows: ~ a month of hires, overlap of 1.)
+        max_number_of_windows = 6 * 24 * 31
+
+        # file naming convention
+        year = start_date.year
+        feature_file = self._feature_file(data_stream, year)
+
+        feature_matrix = pd.DataFrame()
+
+        # condition on the existence of fm save for the year requested
+        if os.path.isfile(feature_file):  # check if feature matrix file exists
+            # load existing feature matrix
+            feature_matrix_preloaded = load_dataframe(
+                feature_file,
+                index_col=0,
+                parse_dates=["time"],
+                infer_datetime_format=True,
+                header=0,
+            )
+
+            # request for features, labeled by index
+            label_1 = [
+                np.datetime64(start_date + index_number_of_windows * self.dto)
+                for index_number_of_windows in range(number_of_windows)
+            ]
+
+            # read the existing feature matrix file (index column only) for current computed features
+            # identify new features for calculation
+            # alternative to last to commands
+            label_2 = load_dataframe(
+                feature_file,
+                index_col=0,
+                parse_dates=["time"],
+                usecols=["time"],
+                infer_datetime_format=True,
+            ).index.values
+            label_3 = []
+            [
+                label_3.append(index_label_1.astype(datetime))
+                for index_label_1 in label_1
+                if index_label_1 not in label_2
+            ]
+
+            # end testing
+            # check is new features need to be calculated (windows)
+            if len(label_3) == 0:  # all features requested already calculated
+                # load requested features (by index) and generate fm
+                feature_matrix = feature_matrix_preloaded[
+                    feature_matrix_preloaded.index.isin(label_1, level=0)
+                ]
+                del feature_matrix_preloaded, label_1, label_2, label_3
+
+            else:  # calculate new features and add to existing saved feature matrix
+                # note: if len(l3) too large for max number of construct windows (say Nmax) l3 is chunked
+                # into subsets smaller of Nmax and call construct_windows/extract_features on these subsets
+                if (
+                    len(label_3) >= max_number_of_windows
+                ):  # condition on length of requested windows
+                    # divide l3 in subsets
+                    n_sbs = int(number_of_windows / max_number_of_windows) + 1
+
+                    def chunks(_list, n):
+                        "Yield successive n-sized chunks from lst"
+                        for i in range(0, len(_list), n):
+                            yield _list[i : i + n]
+
+                    label_3_subsets = chunks(label_3, int(number_of_windows / n_sbs))
+
+                    # copy existing feature matrix (to be filled and save)
+                    _feature_matrix_preloaded = pd.concat([feature_matrix_preloaded])
+
+                    # loop over subsets
+                    for label_3_subset in label_3_subsets:
+                        # generate dataframe for subset
+                        _feature_matrix_new = self._construct_windows_extract_feature(
+                            number_of_windows,
+                            start_date,
+                            data_stream,
+                            index=label_3_subset,
+                        )
+
+                        # concatenate subset with existing feature matrix
+                        feature_matrix: pd.DataFrame = pd.concat(
+                            [_feature_matrix_preloaded, _feature_matrix_new]
+                        )
+                        del _feature_matrix_new
+
+                        # sort new updated feature matrix and save (replace existing one)
+                        feature_matrix.sort_index(inplace=True)
+                        save_dataframe(
+                            feature_matrix, feature_file, index=True, index_label="time"
+                        )
+                else:
+                    # generate dataframe
+                    _feature_matrix_new = self._construct_windows_extract_feature(
+                        number_of_windows, start_date, data_stream, index=label_3
+                    )
+                    feature_matrix: pd.DataFrame = pd.concat(
+                        [feature_matrix_preloaded, _feature_matrix_new]
+                    )
+
+                    # sort new updated feature matrix and save (replace existing one)
+                    feature_matrix.sort_index(inplace=True)
+                    save_dataframe(
+                        feature_matrix, feature_file, index=True, index_label="time"
+                    )
+                # keep in feature matrix (in memory) only the requested windows
+                feature_matrix = feature_matrix[
+                    feature_matrix.index.isin(label_1, level=0)
+                ]
+                #
+                del feature_matrix, label_1, label_2, label_3
+
+        else:
+            ## create feature matrix from scratch
+            year = start_date.year
+            feature_file = self._feature_file(data_stream, year)
+            # note: if Nw is too large for max number of construct windows (say Nmax) the request is chunk
+            # into subsets smaller of Nmax and call construct_windows/extract_features on these subsets
+            if (
+                number_of_windows >= max_number_of_windows
+            ):  # condition on length of requested windows
+                # divide request in subsets
+                number_of_subset = int(number_of_windows / max_number_of_windows) + 1
+
+                def split_num(num, div):
+                    "List of number of elements subsets of num divided by div"
+                    return [
+                        num // div + (1 if x < num % div else 0) for x in range(div)
+                    ]
+
+                number_of_windows_list = split_num(number_of_windows, number_of_subset)
+                ## fm for first subset
+                # generate dataframe
+                feature_matrix = self._construct_windows_extract_feature(
+                    number_of_windows_list[0], start_date, data_stream
+                )
+                # aux intial time (vary for each subset)
+                ti_aux = start_date + (number_of_windows_list[0]) * self.dto
+                # loop over the rest subsets
+                for index_number_of_windows in number_of_windows_list[1:]:
+                    # generate dataframe
+                    fm_new = self._construct_windows_extract_feature(
+                        index_number_of_windows, ti_aux, data_stream
+                    )
+                    # concatenate
+                    feature_matrix = pd.concat([feature_matrix, fm_new])
+                    # increase aux ti
+                    ti_aux = ti_aux + index_number_of_windows * self.dto
+                save_dataframe(
+                    feature_matrix, feature_file, index=True, index_label="time"
+                )
+                # end working section
+                del fm_new
+            else:
+                year = start_date.year
+                feature_file = self._feature_file(data_stream, year)
+                # generate dataframe
+                fm = self._construct_windows_extract_feature(
+                    number_of_windows, start_date, data_stream
+                )
+                save_dataframe(fm, feature_file, index=True, index_label="time")
+
+        # Label vector corresponding to data windows
+        if len(feature_matrix) > 0:
+            label_vector = pd.DataFrame(
+                self._get_label(feature_matrix.index.values),
+                columns=["label"],
+                index=feature_matrix.index,
+            )
+            gc.collect()
+            return feature_matrix, label_vector
+
+        return pd.DataFrame(), pd.DataFrame()
+
+    def _feature_file(self, data_stream, year):
+        ftfl = "_{:d}" + str(year)
+        if year is not None:  # and not self.feature_root.endswith('_{:d}'.format(yr)):
+            ftfl = "_{:d}".format(year)
+        ftfl = self.feature_file(ftfl, data_stream)
+        return ftfl
+
+    def _construct_windows_extract_feature(
+        self, number_of_windows, start_date, data_stream, index=None
+    ) -> pd.DataFrame:
+        """Construct windows, extract features and return dataframe"""
+        cfp = ComprehensiveFCParameters()
+
+        if self.compute_only_features:
+            cfp = dict(
+                [(k, cfp[k]) for k in cfp.keys() if k in self.compute_only_features]
+            )
+        else:
+            # drop features if relevant
+            _ = [cfp.pop(df) for df in self.drop_features if df in list(cfp.keys())]
+
+        kw = {
+            "column_id": "id",
+            "n_jobs": self.n_jobs,
+            "default_fc_parameters": cfp,
+            "impute_function": impute,
+        }
+
+        # construct_windows/extract_features for subsets
+        df, wd = self._construct_windows(
+            number_of_windows, start_date, data_stream, index=index
+        )
+        # extract features and generate feature matrixs
+        feature_matrix = self._extract_features_x(df, **kw)
+        feature_matrix.index = pd.Series(wd)
+        feature_matrix.index.name = "time"
+        return feature_matrix
+
+    def _construct_windows(
+        self,
+        number_of_windows,
+        start_date: datetime,
+        data_stream,
+        i0=0,
+        i1=None,
+        index=None,
+    ):
+        """
+        Create overlapping data windows for feature extraction.
+        """
+        if i1 is None:
+            i1 = number_of_windows
+        if not index:
+            # get data for windowing period
+            df = self.data.get_data(
+                start_date - self.dtw, start_date + (number_of_windows - 1) * self.dto
+            )[[data_stream]]
+
+            # create windows
+            dfs = []
+            for i in range(i0, i1):
+                dfi = df[:].iloc[
+                    i * (self.iw - self.io) : i * (self.iw - self.io) + self.iw
+                ]
+
+                try:
+                    dfi["id"] = pd.Series(
+                        np.ones(self.iw, dtype=int) * i, index=dfi.index
+                    )
+                except ValueError as e:
+                    print(f"❌ _construct_windows :: This shouldn't be happening: {e}")
+
+                dfs.append(dfi)
+
+            df = pd.concat(dfs)
+            window_dates = [start_date + i * self.dto for i in range(number_of_windows)]
+            return df, window_dates[i0:i1]
+        else:
+            # get data for windowing define in index
+            dfs = []
+            for i, ind in enumerate(index):  # loop over index
+                ind = np.datetime64(ind).astype(datetime)
+                dfi = self.data.get_data(ind - self.dtw, ind)[[data_stream]].iloc[:]
+
+                try:
+                    dfi["id"] = pd.Series(
+                        np.ones(self.iw, dtype=int) * i, index=dfi.index
+                    )
+                except ValueError as e:
+                    print(f"❌ _construct_windows :: This shouldn't be happening: {e}")
+                dfs.append(dfi)
+            df = pd.concat(dfs)
+            window_dates = index
+            return df, window_dates
+
+    def _extract_features_x(self, df: pd.DataFrame, **kw) -> pd.DataFrame:
+        t0 = df.index[0] + self.dtw
+        t1 = df.index[-1] + self.dt
+        print(
+            "{:s} feature extraction {:s} to {:s}".format(
+                df.columns[0], t0.strftime("%Y-%m-%d"), t1.strftime("%Y-%m-%d")
+            )
+        )
+        return extract_features(df, **kw)
+
+    def _get_label(self, ts):
+        """Compute label vector."""
+        ys = [
+            self.data.is_eruption_in(days=self.look_forward, from_time=t)
+            for t in pd.to_datetime(ts)
+        ]
+        return ys

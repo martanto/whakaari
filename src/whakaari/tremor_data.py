@@ -863,6 +863,52 @@ class TremorData:
                 self.df["diff_zsc2_" + col] = self.df[col].diff()
                 self.df["diff_zsc2_" + col][0] = 0.0
 
+    def get_data(self, datetime_start=None, datetime_end=None) -> pd.DataFrame:
+        """Return tremor data in requested date range.
+        Parameters:
+        -----------
+        ti : str, datetime.datetime
+            Date of first data point (default is earliest data).
+        tf : str, datetime.datetime
+            Date of final data point (default is latest data).
+        Returns:
+        --------
+        df : pandas.DataFrame
+            Data object truncated to requested date range.
+        """
+        # set date range defaults
+        if datetime_start is None:
+            ti = self.datetime_start
+        if datetime_end is None:
+            tf = self.datetime_end
+
+        # convert datetime format
+        datetime_start = to_datetime(datetime_start)
+        datetime_end = to_datetime(datetime_end)
+
+        # subset data
+        indices = (self.df.index >= datetime_start) & (self.df.index < datetime_end)
+        return self.df.loc[indices]
+
+    def is_eruption_in(self, days, from_time):
+        """Binary classification of eruption imminence.
+        Parameters:
+        -----------
+        days : float
+            Length of look-forward.
+        from_time : datetime.datetime
+            Beginning of look-forward period.
+        Returns:
+        --------
+        label : int
+            1 if eruption occurs in look-forward, 0 otherwise
+
+        """
+        for te in self.tes:
+            if 0 < (te - from_time).total_seconds() / (3600 * 24) < days:
+                return 1.0
+        return 0.0
+
     def _validate(self):
         """
         Load an existing file and check the date range of data.
