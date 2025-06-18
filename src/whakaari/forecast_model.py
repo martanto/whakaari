@@ -313,8 +313,10 @@ class ForecastModel:
             i = 0
             fMa = []
             ysa = []
-            for t0, t1 in zip(date_range[:-1], date_range[1:]):
-                fMi, ysi = self._extract_features(t0, t1 - self.dt, data_stream, year)
+            for time_start, time_end in zip(date_range[:-1], date_range[1:]):
+                fMi, ysi = self._extract_features(
+                    time_start, time_end - self.dt, data_stream, year
+                )
                 i += 1
                 if i == 2:
                     pass
