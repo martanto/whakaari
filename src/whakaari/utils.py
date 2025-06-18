@@ -6,7 +6,14 @@ from obspy import UTCDateTime
 import pandas as pd
 import pickle
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, List, Any, Dict
+from sklearn.neural_network import MLPClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 
 
 def to_datetime(datetime_str) -> datetime:
@@ -43,7 +50,7 @@ def to_datetime(datetime_str) -> datetime:
 def load_dataframe(
     filename,
     index_col=None,
-    parse_dates: bool = False,
+    parse_dates: Any = False,
     usecols=None,
     infer_datetime_format=False,
     nrows=None,
@@ -285,3 +292,73 @@ def compute_dsar(
         columns.append(ratio_name + "F")
 
     return datas, columns
+
+
+def get_classifier(classifier: str) -> Tuple[Any, Dict]:
+    """Return scikit-learn ML classifiers and search grids for input strings.
+    Parameters:
+    -----------
+    classifier : str
+        String designating which classifier to return.
+    Returns:
+    --------
+    model :
+        Scikit-learn classifier object.
+    grid : dict
+        Scikit-learn hyperparameter grid dictionarie.
+    Classifier options:
+    -------------------
+    SVM - Support Vector Machine.
+    KNN - k-Nearest Neighbors
+    DT - Decision Tree
+    RF - Random Forest
+    NN - Neural Network
+    NB - Naive Bayes
+    LR - Logistic Regression
+    """
+    if classifier == "SVM":  # support vector machine
+        model = SVC(class_weight="balanced")
+        grid = {
+            "C": [0.001, 0.01, 0.1, 1, 10],
+            "kernel": ["poly", "rbf", "sigmoid"],
+            "degree": [2, 3, 4, 5],
+            "decision_function_shape": ["ovo", "ovr"],
+        }
+    elif classifier == "KNN":  # k nearest neighbour
+        model = KNeighborsClassifier()
+        grid = {
+            "n_neighbors": [3, 6, 12, 24],
+            "weights": ["uniform", "distance"],
+            "p": [1, 2, 3],
+        }
+    elif classifier == "DT":  # decision tree
+        model = DecisionTreeClassifier(class_weight="balanced")
+        grid = {
+            "max_depth": [3, 5, 7],
+            "criterion": ["gini", "entropy"],
+            "max_features": ["auto", "sqrt", "log2", None],
+        }
+    elif classifier == "RF":  # random forest
+        model = RandomForestClassifier(class_weight="balanced")
+        grid = {
+            "n_estimators": [10, 30, 100],
+            "max_depth": [3, 5, 7],
+            "criterion": ["gini", "entropy"],
+            "max_features": ["auto", "sqrt", "log2", None],
+        }
+    elif classifier == "NN":  # neural network
+        model = MLPClassifier(alpha=1, max_iter=1000)
+        grid = {
+            "activation": ["identity", "logistic", "tanh", "relu"],
+            "hidden_layer_sizes": [10, 100],
+        }
+    elif classifier == "NB":  # naive bayes
+        model = GaussianNB()
+        grid = {"var_smoothing": [1.0e-9]}
+    elif classifier == "LR":  # logistic regression
+        model = LogisticRegression(class_weight="balanced")
+        grid = {"penalty": ["l2", "l1", "elasticnet"], "C": [0.001, 0.01, 0.1, 1, 10]}
+    else:
+        raise ValueError(f"❌ Classifier '{classifier}' not recognised")
+
+    return model, grid
