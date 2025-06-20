@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 from fnmatch import fnmatch
 from glob import glob
-from typing import List, Self, Tuple
 from .tremor_data import TremorData
 from .utils import (
     to_datetime,
@@ -23,6 +22,31 @@ from multiprocessing import Pool
 
 
 class ForecastModel:
+    """
+    Object for train and running forecast models.
+
+    Attributes
+    ----------
+    station : str
+        Station name.
+    start_date : str
+        Beginning of analysis period. If not given, will default to beginning of tremor data.
+    end_date : dict
+        End of analysis period. If not given, will default to end of tremor data.
+    window : int
+        Length of data window in days.
+    overlap : float
+        Fraction of overlap between adjacent windows. Set this to 1. For overlap of entire window minus 1 data point.
+    look_forward : float
+        Length of look-forward in days.
+    data_streams : list[str], optional
+        Data streams and transforms from which to extract features. Options are 'X', 'diff_X', 'log_X', 'inv_X', and 'stft_X'
+        where X is one of 'rsam', 'mf', 'hf', or 'dsar'.
+    verbose : bool
+        Enable additional print statements.
+
+    """
+
     def __init__(
         self,
         station: str,
@@ -33,8 +57,8 @@ class ForecastModel:
         look_forward: float,
         eruptive_file: str,
         tremor_data_file: str = None,
-        data_streams: List[str] = None,
-        exclude_dates: List[str] = None,
+        data_streams: list[str] = None,
+        exclude_dates: list[str] = None,
         root: str = None,
         feature_root: str = None,
         feature_dir: str = None,
@@ -42,6 +66,22 @@ class ForecastModel:
         savefile_type="pkl",
         verbose: bool = False,
     ):
+        """Object for train and running forecast models.
+
+        Parameters
+        ----------
+        station : str
+            Station name
+        start_date : str
+            Start date
+        end_date : str
+            End date
+        window : float
+            Length of data window in days.
+        overlap : float
+            Fraction of overlap between adjacent windows. Set this to 1.
+            For overlap of entire window minus 1 data point.
+        """
         if data_streams is None:
             data_streams = ["rsam", "mf", "hf", "dsar"]
 
@@ -161,9 +201,9 @@ class ForecastModel:
         self.feature_dir = feature_dir
         os.makedirs(self.feature_dir, exist_ok=True)
 
-        self.feature_file = lambda feature_name, ds: os.path.join(
-            feature_dir,
-            f"fm_{window:3.2f}w_{ds}_{station}{feature_name}.{savefile_type}",
+        self.feature_file = lambda feature_name, data_stream: os.path.join(
+            self.feature_dir,
+            f"fm_{window:3.2f}w_{data_stream}_{station}{feature_name}.{savefile_type}",
         )
 
         self.prediction_dir = os.path.join(self.output_dir, "predictions", self.root)
@@ -202,10 +242,10 @@ class ForecastModel:
         random_seed: int = 0,
         drop_features: list = None,
         n_jobs: int = 2,
-        exclude_dates: List[List[str]] = None,
+        exclude_dates: list[list[str]] = None,
         method: float = 0.75,
-        use_features: List[str] = None,
-    ) -> Self:
+        use_features: list[str] = None,
+    ):
         """Construct classifier models.
 
         Args:
@@ -216,12 +256,12 @@ class ForecastModel:
             retrain (bool): Whether to keep the model or not. Defaults to False.
             classifier (str): Classifier name. Defaults to "DT".
             random_seed (int): Random seed. Defaults to 0.
-            drop_features (list): List of feature names to drop. Defaults to None.
+            drop_features (list): list of feature names to drop. Defaults to None.
             n_jobs (int): Number of jobs. Defaults to 2.
-            exclude_dates (List[List[str]): List of dates to exclude features. Example: [['2012-06-01','2012-08-01'],
+            exclude_dates (list[list[str]): list of dates to exclude features. Example: [['2012-06-01','2012-08-01'],
                 ['2015-01-01','2016-01-01']] will drop Jun-Aug 2012 and 2015-2016 from analysis. Defaults to None.
             method (float): Method to use for feature selection. Defaults to 0.75.
-            use_features (List[str]): List of features to use for feature selection. Defaults to None.
+            use_features (list[str]): list of features to use for feature selection. Defaults to None.
 
             Classifier options:
             -------------------
@@ -274,11 +314,18 @@ class ForecastModel:
         # get feature matrix and label vector
         feature_matrix, label_vector = self._load_data()
 
+        if self.verbose:
+            print(f"Feature Matrix dimension : {feature_matrix.shape}")
+            print(f"Label Vector dimension : {label_vector.shape}")
+
         # manually drop features (columns)
         feature_matrix = self._drop_features(feature_matrix, drop_features)
 
         # manually select features (columns)
         if len(self.use_only_features) != 0:
+            if self.verbose:
+                print(f"Use only features: {self.use_only_features}")
+
             use_only_features = [
                 df for df in self.use_only_features if df in feature_matrix.columns
             ]
@@ -289,15 +336,19 @@ class ForecastModel:
         feature_matrix, label_vector = self._exclude_dates(
             feature_matrix, label_vector, exclude_dates
         )
+
         if label_vector.shape[0] != feature_matrix.shape[0]:
             raise ValueError(
-                "dimensions of feature matrix and label vector do not match"
+                f"❌ Dimensions of feature matrix and label vector do not match.\n"
+                f"feature_matrix: {feature_matrix.shape[0]}\n"
+                f"label_vector: {label_vector.shape[0]}\n"
             )
 
         # select training subset
         indices = (label_vector.index >= self.start_date_train) & (
             label_vector.index < self.end_date_train
         )
+
         feature_matrix = feature_matrix.loc[indices]
         label_vector = label_vector["label"].loc[indices]
 
@@ -340,7 +391,7 @@ class ForecastModel:
 
         return self
 
-    def _load_data(self, year: int = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def _load_data(self, year: int = None) -> (pd.DataFrame, pd.DataFrame):
         # Return pre loaded
         start_date: datetime = self.start_date_train
         end_date: datetime = self.end_date_train
@@ -380,8 +431,8 @@ class ForecastModel:
             date_range.append(end_date)
 
         _feature_matrix = []
-        _label_vector = []
 
+        ysa = []
         for data_stream in self.data_streams:
             i = 0
             fma = []
@@ -396,13 +447,23 @@ class ForecastModel:
                 fma.append(fmi)
                 ysa.append(ysi)
             fma = pd.concat(fma)
-            ysa = pd.concat(ysa)
             _feature_matrix.append(fma)
-            _label_vector.append(ysa)
 
         # concat list of fM and ysa
+        if len(ysa) == 0:
+            raise ValueError(f"_load_data > ysa : ysa value is {len(ysa)}")
+
+        _label_vector = pd.concat(ysa)
         _feature_matrix = pd.concat(_feature_matrix, axis=1, sort=False)
-        _label_vector = pd.concat(_label_vector)
+
+        del fmi, ysi, fma, ysa
+        self.start_date_previous = start_date
+        self.end_date_previous = end_date
+        self.feature_matrix = _feature_matrix
+        self.label_vector = _label_vector
+
+        if len(_feature_matrix) > 0:
+            return _feature_matrix, _label_vector
 
         return pd.DataFrame(), pd.DataFrame()
 
@@ -411,7 +472,7 @@ class ForecastModel:
         start_date: datetime,
         end_date: datetime,
         data_stream,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> (pd.DataFrame, pd.DataFrame):
         """
         Extract features from windowed data.
 
@@ -551,7 +612,7 @@ class ForecastModel:
                 number_of_subset = int(number_of_windows / max_number_of_windows) + 1
 
                 def split_num(num, div):
-                    # List of number of elements subsets of num divided by div
+                    # list of number of elements subsets of num divided by div
                     return [
                         num // div + (1 if x < num % div else 0) for x in range(div)
                     ]
@@ -601,11 +662,7 @@ class ForecastModel:
         return pd.DataFrame(), pd.DataFrame()
 
     def _feature_file(self, data_stream, year):
-        ftfl = "_{:d}" + str(year)
-        if year is not None:  # and not self.feature_root.endswith('_{:d}'.format(yr)):
-            ftfl = "_{:d}".format(year)
-        ftfl = self.feature_file(ftfl, data_stream)
-        return ftfl
+        return self.feature_file("_{:d}".format(year), data_stream)
 
     def _construct_windows_extract_feature(
         self, number_of_windows, start_date, data_stream, index=None
@@ -632,10 +689,20 @@ class ForecastModel:
         df, wd = self._construct_windows(
             number_of_windows, start_date, data_stream, index=index
         )
+
         # extract features and generate feature matrixs
         feature_matrix = self._extract_features_x(df, **kw)
         feature_matrix.index = pd.Series(wd)
         feature_matrix.index.name = "time"
+
+        if len(feature_matrix) > 0:
+            _path = os.path.join(self.output_dir, "_extract_features")
+            os.makedirs(_path, exist_ok=True)
+
+            _start_date = start_date.strftime("%Y-%m-%d")
+            _save_path = os.path.join(_path, f"{data_stream}_{_start_date}.xlsx")
+            feature_matrix.to_excel(_save_path)
+
         return feature_matrix
 
     def _construct_windows(
@@ -703,6 +770,8 @@ class ForecastModel:
                 df.columns[0], t0.strftime("%Y-%m-%d"), t1.strftime("%Y-%m-%d")
             )
         )
+
+        # tsfresh extract features
         return extract_features(df, **kw)
 
     def _get_label(self, ts):
@@ -730,6 +799,9 @@ class ForecastModel:
         """
         self.drop_features = drop_features
         if len(self.drop_features) > 0:
+            if self.verbose:
+                print(f"dropping features : {self.drop_features}")
+
             comprehensive_features = ComprehensiveFCParameters()
             df2 = []
             for df in self.drop_features:
@@ -749,7 +821,7 @@ class ForecastModel:
         self,
         feature_matrix: pd.DataFrame,
         label_vector: pd.DataFrame,
-        exclude_dates: List,
+        exclude_dates: None,
     ):
         """Drop rows from feature matrix and label vector.
         Parameters:
@@ -759,7 +831,7 @@ class ForecastModel:
         y : pd.DataFrame
             Label vector.
         exclude_dates : list
-            List of time windows to exclude during training. Facilitates dropping of eruption
+            list of time windows to exclude during training. Facilitates dropping of eruption
             windows within analysis period. E.g., exclude_dates = [['2012-06-01','2012-08-01'],
             ['2015-01-01','2016-01-01']] will drop Jun-Aug 2012 and 2015-2016 from analysis.
         Returns:
@@ -770,12 +842,14 @@ class ForecastModel:
             Reduced label vector.
         """
         self.exclude_dates = exclude_dates
-        if len(self.exclude_dates) > 0:
-            for exclude_date_range in self.exclude_dates:
-                t0, t1 = [to_datetime(dt) for dt in exclude_date_range]
-                indices = (label_vector.index < t0) | (label_vector.index >= t1)
-                feature_matrix = feature_matrix.loc[indices]
-                label_vector = label_vector.loc[indices]
+        if self.exclude_dates is not None:
+            if len(self.exclude_dates) > 0:
+                for exclude_date_range in self.exclude_dates:
+                    t0, t1 = [to_datetime(dt) for dt in exclude_date_range]
+                    indices = (label_vector.index < t0) | (label_vector.index >= t1)
+                    feature_matrix = feature_matrix.loc[indices]
+                    label_vector = label_vector.loc[indices]
+
         return feature_matrix, label_vector
 
     def _collect_features(self, save=None):

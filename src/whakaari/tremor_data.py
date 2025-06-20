@@ -165,7 +165,7 @@ class TremorData:
                 data_dir, "output", f"{self.station}_tremor_data.csv"
             )
         self.tremor_file = tremor_data_file
-        self.tremor_file_exists = os.path.isfile(self.tremor_file)
+        self.tremor_file_exists = os.path.exists(self.tremor_file)
 
         self.eruptive_file = eruptive_file
         if eruptive_file is None:
@@ -192,7 +192,7 @@ class TremorData:
         # Originally self.tf
         self.datetime_end = None
 
-        self.tmp_dir = os.path.join(os.getcwd(), "_tmp")
+        self.tmp_dir = os.path.join(os.getcwd(), "_tmp", station)
         self.cleanup_tmp_dir = cleanup_tmp_dir
 
         if verbose:
@@ -200,6 +200,7 @@ class TremorData:
             print(f"Parent: {self.parent}")
             print(f"Data Dir: {self.data_dir}")
             print(f"Tremor Data file: {self.tremor_file}")
+            print(f"Tremor Data exists: {self.tremor_file_exists}")
             print(f"Eruption file: {self.eruptive_file}")
             print(f"Number of jobs: {self.n_jobs}")
             print(f"Cols: {self.cols}")
@@ -676,7 +677,7 @@ class TremorData:
 
         # Compute rsam and other bands (w/ EQ filter)
         if self.verbose:
-            print(f"🧮 Computing RSAM ...")
+            print(f"🧮 Computing RSAM ...", end="")
 
         data_rsam, columns_rsam = compute_rsam(
             _datas,
@@ -690,10 +691,12 @@ class TremorData:
         )
         datas += data_rsam
         columns += columns_rsam
+        if self.verbose:
+            print(f" Done")
 
         # Compute dsar (w/ EQ filter)
         if self.verbose:
-            print(f"🧮 Computing DSAR ...")
+            print(f"🧮 Computing DSAR ...", end="")
 
         data_dsar, column_dsar = compute_dsar(
             _data_is,
@@ -707,6 +710,8 @@ class TremorData:
         )
         datas += data_dsar
         columns += column_dsar
+        if self.verbose:
+            print(f" Done")
 
         # Write out a temporary file
         datas = np.array(datas)
