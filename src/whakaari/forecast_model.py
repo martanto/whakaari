@@ -3,14 +3,23 @@ from __future__ import annotations
 import os, gc
 import pandas as pd
 import numpy as np
+from fnmatch import fnmatch
 from glob import glob
 from typing import List, Self, Tuple
 from .tremor_data import TremorData
-from .utils import to_datetime, get_classifier, load_dataframe, save_dataframe
+from .utils import (
+    to_datetime,
+    get_classifier,
+    load_dataframe,
+    save_dataframe,
+    train_one_model,
+)
 from datetime import datetime, timedelta
 from tsfresh import extract_features
 from tsfresh.utilities.dataframe_functions import impute
 from tsfresh.feature_extraction.settings import ComprehensiveFCParameters
+from functools import partial
+from multiprocessing import Pool
 
 
 class ForecastModel:
@@ -265,6 +274,70 @@ class ForecastModel:
         # get feature matrix and label vector
         feature_matrix, label_vector = self._load_data()
 
+        # manually drop features (columns)
+        feature_matrix = self._drop_features(feature_matrix, drop_features)
+
+        # manually select features (columns)
+        if len(self.use_only_features) != 0:
+            use_only_features = [
+                df for df in self.use_only_features if df in feature_matrix.columns
+            ]
+            feature_matrix = feature_matrix[use_only_features]
+            number_of_significant_features = len(use_only_features) + 1
+
+        # manually drop windows (rows)
+        feature_matrix, label_vector = self._exclude_dates(
+            feature_matrix, label_vector, exclude_dates
+        )
+        if label_vector.shape[0] != feature_matrix.shape[0]:
+            raise ValueError(
+                "dimensions of feature matrix and label vector do not match"
+            )
+
+        # select training subset
+        indices = (label_vector.index >= self.start_date_train) & (
+            label_vector.index < self.end_date_train
+        )
+        feature_matrix = feature_matrix.loc[indices]
+        label_vector = label_vector["label"].loc[indices]
+
+        # set up model training
+        p = Pool(self.n_jobs)
+        mapper = p.imap
+
+        if self.n_jobs == 1:
+            mapper = map
+
+        f = partial(
+            train_one_model,
+            feature_matrix,
+            label_vector,
+            number_of_significant_features,
+            self.model_dir,
+            self.classifier,
+            retrain,
+            random_seed,
+            method,
+        )
+
+        # train models with glorious progress bar
+        # f(0)
+        for i, _ in enumerate(mapper(f, range(number_of_classifiers))):
+            _classifier = (i + 1) / number_of_classifiers
+            print(
+                f'building models: [{"#" * round(50 * _classifier) + "-" * round(50 * (1 - _classifier))}] {100. * _classifier:.2f}%\r',
+                end="",
+            )
+
+        if self.n_jobs > 1:
+            p.close()
+            p.join()
+
+        # free memory
+        del feature_matrix
+        gc.collect()
+        self._collect_features()
+
         return self
 
     def _load_data(self, year: int = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -311,20 +384,20 @@ class ForecastModel:
 
         for data_stream in self.data_streams:
             i = 0
-            fMa = []
+            fma = []
             ysa = []
             for time_start, time_end in zip(date_range[:-1], date_range[1:]):
-                fMi, ysi = self._extract_features(
-                    time_start, time_end - self.dt, data_stream, year
+                fmi, ysi = self._extract_features(
+                    time_start, time_end - self.dt, data_stream
                 )
                 i += 1
                 if i == 2:
                     pass
-                fMa.append(fMi)
+                fma.append(fmi)
                 ysa.append(ysi)
-            fMa = pd.concat(fMa)
+            fma = pd.concat(fma)
             ysa = pd.concat(ysa)
-            _feature_matrix.append(fMa)
+            _feature_matrix.append(fma)
             _label_vector.append(ysa)
 
         # concat list of fM and ysa
@@ -334,7 +407,10 @@ class ForecastModel:
         return pd.DataFrame(), pd.DataFrame()
 
     def _extract_features(
-        self, start_date: datetime, end_date: datetime, data_stream, year=None
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        data_stream,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Extract features from windowed data.
@@ -401,17 +477,17 @@ class ForecastModel:
                 ]
                 del feature_matrix_preloaded, label_1, label_2, label_3
 
-            else:  # calculate new features and add to existing saved feature matrix
+            else:
+                # calculate new features and add to existing saved feature matrix
                 # note: if len(l3) too large for max number of construct windows (say Nmax) l3 is chunked
                 # into subsets smaller of Nmax and call construct_windows/extract_features on these subsets
-                if (
-                    len(label_3) >= max_number_of_windows
-                ):  # condition on length of requested windows
+                if len(label_3) >= max_number_of_windows:
+                    # condition on length of requested windows
                     # divide l3 in subsets
                     n_sbs = int(number_of_windows / max_number_of_windows) + 1
 
                     def chunks(_list, n):
-                        "Yield successive n-sized chunks from lst"
+                        # Yield successive n-sized chunks from lst
                         for i in range(0, len(_list), n):
                             yield _list[i : i + n]
 
@@ -446,7 +522,7 @@ class ForecastModel:
                     _feature_matrix_new = self._construct_windows_extract_feature(
                         number_of_windows, start_date, data_stream, index=label_3
                     )
-                    feature_matrix: pd.DataFrame = pd.concat(
+                    feature_matrix = pd.concat(
                         [feature_matrix_preloaded, _feature_matrix_new]
                     )
 
@@ -466,16 +542,16 @@ class ForecastModel:
             ## create feature matrix from scratch
             year = start_date.year
             feature_file = self._feature_file(data_stream, year)
+
             # note: if Nw is too large for max number of construct windows (say Nmax) the request is chunk
             # into subsets smaller of Nmax and call construct_windows/extract_features on these subsets
-            if (
-                number_of_windows >= max_number_of_windows
-            ):  # condition on length of requested windows
+            if number_of_windows >= max_number_of_windows:
+                # condition on length of requested windows
                 # divide request in subsets
                 number_of_subset = int(number_of_windows / max_number_of_windows) + 1
 
                 def split_num(num, div):
-                    "List of number of elements subsets of num divided by div"
+                    # List of number of elements subsets of num divided by div
                     return [
                         num // div + (1 if x < num % div else 0) for x in range(div)
                     ]
@@ -636,3 +712,106 @@ class ForecastModel:
             for t in pd.to_datetime(ts)
         ]
         return ys
+
+    def _drop_features(
+        self, feature_matrix: pd.DataFrame, drop_features
+    ) -> pd.DataFrame:
+        """Drop columns from feature matrix.
+        Parameters:
+        -----------
+        feature_matrix : pd.DataFrame
+            Matrix to drop columns.
+        drop_features : list
+            tsfresh feature names or calculators to drop from matrix.
+        Returns:
+        --------
+        feature_matrix : pd.DataFrame
+            Reduced matrix.
+        """
+        self.drop_features = drop_features
+        if len(self.drop_features) > 0:
+            comprehensive_features = ComprehensiveFCParameters()
+            df2 = []
+            for df in self.drop_features:
+                if df in feature_matrix.columns:
+                    df2.append(df)  # exact match
+                else:
+                    if df in comprehensive_features.keys() or df in [
+                        "fft_coefficient_hann"
+                    ]:
+                        df = "*__{:s}__*".format(df)  # feature calculator
+                    # wildcard match
+                    df2 += [col for col in feature_matrix.columns if fnmatch(col, df)]
+            feature_matrix = feature_matrix.drop(columns=df2)
+        return feature_matrix
+
+    def _exclude_dates(
+        self,
+        feature_matrix: pd.DataFrame,
+        label_vector: pd.DataFrame,
+        exclude_dates: List,
+    ):
+        """Drop rows from feature matrix and label vector.
+        Parameters:
+        -----------
+        feature_matrix : pd.DataFrame
+            Matrix to drop columns.
+        y : pd.DataFrame
+            Label vector.
+        exclude_dates : list
+            List of time windows to exclude during training. Facilitates dropping of eruption
+            windows within analysis period. E.g., exclude_dates = [['2012-06-01','2012-08-01'],
+            ['2015-01-01','2016-01-01']] will drop Jun-Aug 2012 and 2015-2016 from analysis.
+        Returns:
+        --------
+        Xr : pd.DataFrame
+            Reduced matrix.
+        yr : pd.DataFrame
+            Reduced label vector.
+        """
+        self.exclude_dates = exclude_dates
+        if len(self.exclude_dates) > 0:
+            for exclude_date_range in self.exclude_dates:
+                t0, t1 = [to_datetime(dt) for dt in exclude_date_range]
+                indices = (label_vector.index < t0) | (label_vector.index >= t1)
+                feature_matrix = feature_matrix.loc[indices]
+                label_vector = label_vector.loc[indices]
+        return feature_matrix, label_vector
+
+    def _collect_features(self, save=None):
+        """Aggregate features used to train classifiers by frequency.
+        Parameters:
+        -----------
+        save : None or str
+            If given, name of file to save feature frequencies. Defaults to all.fts
+            if model directory.
+        Returns:
+        --------
+        labels : list
+            Feature names.
+        freqs : list
+            Frequency of feature appearance in classifier models.
+        """
+        if save is None:
+            save = os.path.join(self.model_dir, "all.fts")
+
+        feats = []
+        fls = glob(os.path.join(self.model_dir, "*.fts"))
+        for i, fl in enumerate(fls):
+            if fl.split(os.sep)[-1].split(".")[0] in ["all", "ranked"]:
+                continue
+            with open(fl) as fp:
+                lns = fp.readlines()
+            feats += [" ".join(ln.rstrip().split()[1:]) for ln in lns]
+
+        labels = list(set(feats))
+        freqs = [feats.count(label) for label in labels]
+        labels = [label for _, label in sorted(zip(freqs, labels))][::-1]
+        freqs = sorted(freqs)[::-1]
+        # write out feature frequencies
+        with open(save, "w") as fp:
+            _ = [
+                fp.write("{:d},{:s}\n".format(freq, ft))
+                for freq, ft in zip(freqs, labels)
+            ]
+        return labels, freqs

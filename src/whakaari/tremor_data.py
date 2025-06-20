@@ -878,9 +878,9 @@ class TremorData:
         """
         # set date range defaults
         if datetime_start is None:
-            ti = self.datetime_start
+            datetime_start = self.datetime_start
         if datetime_end is None:
-            tf = self.datetime_end
+            datetime_end = self.datetime_end
 
         # convert datetime format
         datetime_start = to_datetime(datetime_start)

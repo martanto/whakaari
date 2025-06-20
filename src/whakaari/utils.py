@@ -1,11 +1,14 @@
 from __future__ import annotations
+
+import pandas as pd
+import pickle
+import numpy as np
+import os, joblib
+
 from datetime import datetime
 from numpy import ndarray
 from pandas import Timestamp
 from obspy import UTCDateTime
-import pandas as pd
-import pickle
-import numpy as np
 from typing import Tuple, List, Any, Dict
 from sklearn.neural_network import MLPClassifier
 from sklearn.neighbors import KNeighborsClassifier
@@ -14,6 +17,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.naive_bayes import GaussianNB
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
+from sklearn.model_selection import GridSearchCV, ShuffleSplit
+from tsfresh.transformers import FeatureSelector
+from imblearn.under_sampling import RandomUnderSampler
 
 
 def to_datetime(datetime_str) -> datetime:
@@ -362,3 +368,50 @@ def get_classifier(classifier: str) -> Tuple[Any, Dict]:
         raise ValueError(f"❌ Classifier '{classifier}' not recognised")
 
     return model, grid
+
+
+def train_one_model(
+    feature_matrix,
+    label_vector,
+    number_of_significant_features,
+    model_dir,
+    classifier,
+    retrain,
+    random_seed,
+    method,
+    random_state,
+):
+    # undersample data
+    rus = RandomUnderSampler(method, random_state=random_state + random_seed)
+    fmt, yst = rus.fit_resample(feature_matrix, label_vector)
+    yst = pd.Series(yst > 0, index=range(len(yst)))
+    fmt.index = yst.index
+
+    # find significant features
+    select = FeatureSelector(n_jobs=0, ml_task="classification")
+    select.fit_transform(fmt, yst)
+    fts = select.features[:number_of_significant_features]
+    pvs = select.p_values[:number_of_significant_features]
+    fmt = fmt[fts]
+    with open("{:s}/{:04d}.fts".format(model_dir, random_state), "w") as fp:
+        for f, pv in zip(fts, pvs):
+            fp.write("{:4.3e} {:s}\n".format(pv, f))
+
+    # get sklearn training objects
+    ss = ShuffleSplit(
+        n_splits=5, test_size=0.25, random_state=random_state + random_seed
+    )
+    model, grid = get_classifier(classifier)
+
+    # check if model has already been trained
+    pref = type(model).__name__
+    fl = "{:s}/{:s}_{:04d}.pkl".format(model_dir, pref, random_state)
+    if os.path.isfile(fl) and not retrain:
+        return
+
+    # train and save classifier
+    model_cv = GridSearchCV(
+        model, grid, cv=ss, scoring="balanced_accuracy", error_score=np.nan
+    )
+    model_cv.fit(fmt, yst)
+    _ = joblib.dump(model_cv.best_estimator_, fl, compress=3)
