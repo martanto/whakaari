@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os, gc
+import os, gc, pathlib
 import pandas as pd
 import numpy as np
+from matplotlib import pyplot as plt
 from fnmatch import fnmatch
 from glob import glob
 from .tremor_data import TremorData
@@ -12,6 +13,8 @@ from .utils import (
     load_dataframe,
     save_dataframe,
     train_one_model,
+    predict_one_model,
+    to_nz_timezone,
 )
 from datetime import datetime, timedelta
 from tsfresh import extract_features
@@ -19,6 +22,9 @@ from tsfresh.utilities.dataframe_functions import impute
 from tsfresh.feature_extraction.settings import ComprehensiveFCParameters
 from functools import partial
 from multiprocessing import Pool
+
+
+ALL_CLASSIFIERS = ["SVM", "KNN", "DT", "RF", "NN", "NB", "LR"]
 
 
 class ForecastModel:
@@ -57,13 +63,14 @@ class ForecastModel:
         look_forward: float,
         eruptive_file: str,
         tremor_data_file: str = None,
-        data_streams: list[str] = None,
-        exclude_dates: list[str] = None,
+        data_streams: list = None,
+        exclude_dates: list = None,
         root: str = None,
         feature_root: str = None,
         feature_dir: str = None,
         n_jobs: int = 2,
         savefile_type="pkl",
+        show_warnings: bool = False,
         verbose: bool = False,
     ):
         """Object for train and running forecast models.
@@ -86,12 +93,15 @@ class ForecastModel:
             data_streams = ["rsam", "mf", "hf", "dsar"]
 
         self.verbose = verbose
+        self.show_warnings = show_warnings
         self.station = station
         self.data_streams = data_streams
         self.exclude_dates = exclude_dates
 
         # Length of look-forward in days
         self.look_forward: float = look_forward
+
+        self.eruptive_file = eruptive_file
         self.savefile_type = savefile_type
 
         self.data: TremorData = TremorData(
@@ -219,6 +229,8 @@ class ForecastModel:
         self.end_date_previous = None
         self.feature_matrix = pd.DataFrame()
         self.label_vector = pd.DataFrame()
+        self.start_date_forecast = None
+        self.end_date_forecast = None
 
         if verbose:
             print(f"Start date: {self.start_date_model.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -237,14 +249,15 @@ class ForecastModel:
         end_date: str,
         number_of_significant_features: int = 20,
         number_of_classifiers: int = 500,
-        retrain: bool = False,
+        retrain_model: bool = False,
         classifier: str = "DT",
         random_seed: int = 0,
         drop_features: list = None,
         n_jobs: int = 2,
-        exclude_dates: list[list[str]] = None,
+        exclude_dates: list = None,
         method: float = 0.75,
-        use_features: list[str] = None,
+        use_features: list = None,
+        show_warnings: bool = False,
     ):
         """Construct classifier models.
 
@@ -253,7 +266,7 @@ class ForecastModel:
             end_date (str): End date of the model.
             number_of_significant_features (int): Number of significant features.
             number_of_classifiers (int): Number of classifiers.
-            retrain (bool): Whether to keep the model or not. Defaults to False.
+            retrain_model (bool): Whether to keep the model or not. Defaults to False.
             classifier (str): Classifier name. Defaults to "DT".
             random_seed (int): Random seed. Defaults to 0.
             drop_features (list): list of feature names to drop. Defaults to None.
@@ -262,6 +275,8 @@ class ForecastModel:
                 ['2015-01-01','2016-01-01']] will drop Jun-Aug 2012 and 2015-2016 from analysis. Defaults to None.
             method (float): Method to use for feature selection. Defaults to 0.75.
             use_features (list[str]): list of features to use for feature selection. Defaults to None.
+            show_warnings (bool): Whether to show the warnings message. Defaults to False.
+
 
             Classifier options:
             -------------------
@@ -280,6 +295,7 @@ class ForecastModel:
         self.exclude_dates = exclude_dates
         self.use_features = use_features
         self.n_jobs = n_jobs
+        self.show_warnings = show_warnings
 
         # Originally named as Ncl
         self.number_of_classifiers = number_of_classifiers
@@ -296,7 +312,7 @@ class ForecastModel:
 
         # check if any model training required
         run_models = False
-        if not retrain:
+        if not retrain_model:
             model, _grids = get_classifier(self.classifier)
             prefix = type(model).__name__
             for classifier_index in range(number_of_classifiers):
@@ -366,7 +382,7 @@ class ForecastModel:
             number_of_significant_features,
             self.model_dir,
             self.classifier,
-            retrain,
+            retrain_model,
             random_seed,
             method,
         )
@@ -391,10 +407,474 @@ class ForecastModel:
 
         return self
 
-    def _load_data(self, year: int = None) -> (pd.DataFrame, pd.DataFrame):
+    def _detect_model(self, model_path: str = None):
+        """Checks whether and what models have already been run."""
+        if model_path is None:
+            model_path = self.model_dir
+
+        files = glob(os.path.join(model_path, "*.fts"))
+        if len(files) == 0:
+            raise ValueError(f"❌ Features not found at {model_path}")
+
+        indices = [
+            int(pathlib.Path(file).stem) for file in files if ("all.fts" not in file)
+        ]
+
+        if max(indices) != (len(indices) - 1):
+            raise ValueError(
+                f"❌ Feature file numbering in '{model_path}' appears not consecutive"
+            )
+
+        self.classifier = []
+        for classifier in ALL_CLASSIFIERS:
+            model = get_classifier(classifier)[0]
+            prefix = type(model).__name__
+            if all(
+                [
+                    os.path.isfile(
+                        os.path.join(model_path, f"{prefix}_{classifier_index:04d}.pkl")
+                    )
+                    for classifier_index in indices
+                ]
+            ):
+                self.classifier = classifier
+                return True
+
+        raise ValueError(f"❌ Did not recognise models in '{model_path}'")
+
+    def forecast(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        recalculate=False,
+        model_path: str = None,
+        n_jobs: int = None,
+        year=None,
+    ):
+        """Use classifier models to forecast eruption likelihood.
+        Parameters:
+        -----------
+        ti : str, datetime.datetime
+            Beginning of forecast period (default is beginning of model analysis period).
+        tf : str, datetime.datetime
+            End of forecast period (default is end of model analysis period).
+        recalculate : bool
+            Flag indicating forecast should be recalculated, otherwise forecast will be
+            loaded from previous save file (if it exists).
+        model_path : None or str
+            Optionally pass path to pre-trained model directory in 'models'.
+        n_jobs : int
+            Number of cores to use.
+        Returns:
+        --------
+        consensus : pd.DataFrame
+            The model consensus, indexed by window date.
+        """
+        year_str = "_{:d}".format(year) if year is not None else ""
+        consensus_file = os.path.join(
+            self.prediction_dir, f"consensus{year_str}.{self.savefile_type}"
+        )
+        # confl = "{:s}/consensus{:s}".format(
+        #     self.prediction_dir, "{:s}.{:s}".format(year_str, self.savefile_type)
+        # )
+
+        if os.path.isfile(consensus_file) and not recalculate:
+            return load_dataframe(consensus_file)
+
+        if n_jobs is None:
+            n_jobs = self.n_jobs
+
+        self.start_date_forecast = (
+            self.start_date_model if start_date is None else to_datetime(start_date)
+        )
+        self.end_date_forecast = (
+            self.end_date_model if end_date is None else to_datetime(end_date)
+        )
+
+        if self.end_date_forecast > self.data.datetime_end:
+            self.end_date_forecast = self.data.datetime_end
+        if self.start_date_forecast - self.dtw < self.data.datetime_start:
+            self.start_date_forecast = self.data.datetime_start + self.dtw
+
+        if model_path is not None:
+            self._detect_model(model_path=model_path)
+
+        model, classifier = get_classifier(self.classifier)
+
+        # logic to determine which models need to be run and which to be
+        # read from disk
+        prefix = type(model).__name__
+        models = glob(os.path.join(model_path, f"{prefix}_*.pkl"))
+        run_predictions = []
+        ys = []
+        start_date_list = []
+
+        # create a prediction for each model
+        for model in models:
+            # change location
+            prediction_model = model.replace(model_path, self.prediction_dir + os.sep)
+            # update filetype
+            prediction_model_path = prediction_model.replace(
+                ".pkl", "{:s}.{:s}".format(year_str, self.savefile_type)
+            )
+
+            # check if prediction already exists
+            if os.path.isfile(prediction_model_path):
+                if recalculate:
+                    # delete predictions to be recalculated
+                    os.remove(prediction_model_path)
+                    run_predictions.append([model, prediction_model_path])
+                    start_date_list.append(self.start_date_forecast)
+                else:
+                    # load an existing prediction
+                    y = load_dataframe(
+                        prediction_model_path,
+                        index_col=0,
+                        parse_dates=["time"],
+                        infer_datetime_format=True,
+                    )
+                    # check if prediction spans the requested interval
+                    if y.index[-1] < self.start_date_forecast:
+                        run_predictions.append([model, prediction_model_path])
+                        start_date_list.append(y.index[-1])
+                    else:
+                        ys.append(y)
+            else:
+                run_predictions.append([model, prediction_model_path])
+                start_date_list.append(self.start_date_forecast)
+
+        if len(start_date_list) > 0:
+            start_date = np.min(start_date_list)
+
+        # generate new predictions
+        if len(run_predictions) > 0:
+            # load feature matrix
+            fM, _ = self._load_data(start_date, self.start_date_forecast, year)
+
+            if len(fM) == 0:
+                raise ValueError(
+                    f"❌ Feature matrix is empty. Start date is {start_date}. Forecast period is {self.start_date_forecast}"
+                )
+
+            # setup predictor
+            p = Pool(n_jobs)
+            if n_jobs > 1:
+                mapper = p.imap
+            else:
+                mapper = map
+
+            predict_function = partial(predict_one_model, fM, model_path)
+
+            # run models with glorious progress bar
+            predict_function(run_predictions[0])
+
+            print(f"Length of run_predictions: {len(run_predictions)}")
+
+            for i, y in enumerate(mapper(predict_function, run_predictions)):
+                cf = (i + 1) / len(run_predictions)
+                if year is None:
+                    print(
+                        f'forecasting: [{"#" * round(50 * cf) + "-" * round(50 * (1 - cf))}] {100. * cf:.2f}%\r',
+                        end="",
+                    )
+                else:
+                    print(
+                        f'forecasting {year:d}: [{"#" * round(50 * cf) + "-" * round(50 * (1 - cf))}] {100. * cf:.2f}%\r',
+                        end="",
+                    )
+                ys.append(y)
+
+            if n_jobs > 1:
+                p.close()
+                p.join()
+
+        # condense data frames and write output
+        ys = pd.concat(ys, axis=1, sort=False)
+        consensus = np.mean(
+            [ys[col].values for col in ys.columns if "pred" in col], axis=0
+        )
+        forecast = pd.DataFrame(consensus, columns=["consensus"], index=ys.index)
+
+        save_dataframe(forecast, consensus_file, index=True, index_label="time")
+
+        # memory management
+        if len(run_predictions) > 0:
+            del fM
+            gc.collect()
+
+        return forecast
+
+    def hires_forecast(
+        self,
+        start_date: str,
+        end_date: str,
+        recalculate: bool = True,
+        save: str = None,
+        root: str = None,
+        nz_timezone: bool = False,
+        n_jobs: int = None,
+        threshold: float = 0.8,
+        xlim: list = None,
+    ):
+        """Construct forecast at resolution of data.
+        Parameters:
+        -----------
+        start_date : str, datetime.datetime
+            Beginning of forecast period.
+        end_date : str, datetime.datetime
+            End of forecast period.
+        recalculate : bool
+            Flag indicating forecast should be recalculated, otherwise forecast will be
+            loaded from previous save file (if it exists).
+        save : None or str
+            If given, plot forecast and save to filename.
+        root : None or str
+            Naming convention for saving feature matrix.
+        nztimezone : bool
+            Flag to plot forecast using NZ time zone instead of UTC.
+        n_jobs : int
+            CPUs to use when forecasting in parallel.
+        Notes:
+        ------
+        Requires model to have already been trained.
+        """
+        # error checking
+        if self.start_date_train is None:
+            raise ValueError("❌ Train model before constructing hi-res forecast.")
+
+        if save is None:
+            save = os.path.join(self.plot_dir, "hires_forecast.png")
+
+        if n_jobs is not None:
+            self.n_jobs = n_jobs
+
+        # calculate hires feature matrix
+        if root is None:
+            root = f"{self.root}_hires"
+
+        _fm = ForecastModel(
+            window=self.window,
+            station=self.station,
+            eruptive_file=self.eruptive_file,
+            start_date=start_date,
+            end_date=end_date,
+            overlap=1.0,
+            look_forward=self.look_forward,
+            data_streams=self.data_streams,
+            root=root,
+            savefile_type=self.savefile_type,
+            feature_root=root,
+            feature_dir=self.feature_dir,
+        )
+
+        _fm.compute_only_features = list(
+            set([ft.split("__")[1] for ft in self._collect_features()[0]])
+        )
+
+        for data_stream in self.data_streams:
+            _fm._extract_features(
+                to_datetime(start_date), to_datetime(end_date), data_stream
+            )
+
+        # predict on hires features
+        label_vector = _fm.forecast(
+            start_date, end_date, recalculate, model_path=self.model_dir, n_jobs=n_jobs
+        )
+
+        if save is not None:
+            self._plot_hires_forecast(
+                label_vector,
+                save,
+                threshold,
+                nz_timezone=nz_timezone,
+                xlim=xlim,
+            )
+
+        return label_vector
+
+    def _plot_hires_forecast(
+        self,
+        label_vector,
+        save,
+        threshold=0.75,
+        nz_timezone=False,
+        xlim=None,
+    ):
+        """Plot model hires version of model forecast (single axes).
+        Parameters:
+        -----------
+        label_vector : pandas.DataFrame
+            Model forecast returned by ForecastModel.forecast.
+        threshold : float
+            Threshold consensus to declare alert.
+        save : str
+            File name to save figure.
+        """
+        # set up figures and axes
+        f = plt.figure(figsize=(8, 4))
+        ax = plt.axes([0.1, 0.08, 0.8, 0.8])
+
+        time_index = pd.to_datetime(label_vector.index.values)
+        time_index_start = time_index[0]
+        time_index_end = time_index[-1]
+
+        # if True:  # plot filtered data
+        if "zsc_rsamF" in self.data_streams and "rsamF" not in self.data_streams:
+            rsam = self.data.get_data(time_index_start, time_index_end)["zsc_rsamF"]
+        else:
+            rsam = self.data.get_data(time_index_start, time_index_end)["rsamF"]
+        # else:
+        #     if "zsc_rsam" in self.data_streams and "rsam" not in self.data_streams:
+        #         rsam = self.data.get_data(t[0], t[-1])["zsc_rsam"]
+        #     else:
+        #         rsam = self.data.get_data(t[0], t[-1])["rsam"]
+
+        time_index_rsam = rsam.index
+        time_index_rsam_end = time_index_rsam[-1]
+        time_index_rsam_start = time_index_rsam[0]
+
+        if nz_timezone:
+            time_index = to_nz_timezone(time_index)
+            time_index_rsam = to_nz_timezone(time_index_rsam)
+            ax.set_xlabel("Local time")
+        else:
+            ax.set_xlabel("UTC")
+
+        y = np.mean(
+            np.array([label_vector[col] for col in label_vector.columns]), axis=0
+        )
+
+        ax.set_ylim([-0.05, 1.05])
+        ax.set_yticks([0, 0.25, 0.50, 0.75, 1.00])
+        ax.set_ylabel("ensemble mean")
+
+        # consensus threshold
+        ax.axhline(
+            threshold, color="k", linestyle=":", label="alert threshold", zorder=4
+        )
+
+        # modelled alert
+        ax.plot(time_index, y, "c-", label="ensemble mean", zorder=4, lw=0.75)
+        ci = self._compute_confidence_interval(y)
+
+        ax.fill_between(time_index, (y - ci), (y + ci), color="c", zorder=5, alpha=0.3)
+        ax_ = ax.twinx()
+        ax_.set_ylabel("RSAM [$\mu$m s$^{-1}$]")
+        ax_.set_ylim([0, 5])
+        ax_.plot(time_index_rsam, rsam.values * 1.0e-3, "k-", lw=0.75)
+
+        for tii, yi in zip(time_index, y):
+            if yi > threshold:
+                ax.fill_between(
+                    [tii, tii + self.dtf], [0, 0], [100, 100], color="y", zorder=3
+                )
+
+        for te in self.data.tes:
+            ax.axvline(te, color="r", linestyle="--", zorder=10)
+
+        ax.plot([], [], "r--", label="eruption")
+        ax.fill_between([], [], [], color="y", label="eruption forecast")
+        ax.plot([], [], "k-", lw=0.75, label="RSAM")
+
+        ax.legend(loc=2, ncol=2)
+
+        time_index_max = (
+            time_index_end
+            if time_index_end > time_index_rsam_end
+            else time_index_rsam_end
+        )
+        time_index_min = (
+            time_index_start
+            if time_index_start < time_index_rsam_start
+            else time_index_rsam_start
+        )
+
+        if xlim is None:
+            xlim = [time_index_min, time_index_max]
+
+        tf = time_index_max
+        t0 = tf.replace(hour=0, minute=0, second=0)
+        dt = (time_index_max - time_index_min).total_seconds()
+
+        if self.verbose:
+            print(f"dt values = {dt}")
+
+        if dt < 10.0 * 24 * 3600:
+            n_days = int(np.ceil(dt / (24 * 3600)))
+            xts = [t0 - timedelta(days=i) for i in range(n_days)][::-1]
+            label_xts = [xt.strftime("%d %b") for xt in xts]
+        elif dt < 20.0 * 24 * 3600:
+            n_days = int(np.ceil(dt / (24 * 3600)) / 2)
+            xts = [t0 - timedelta(days=2 * i) for i in range(n_days)][::-1]
+            label_xts = [xt.strftime("%d %b") for xt in xts]
+        elif dt < 70.0 * 24 * 3600:
+            n_days = int(np.ceil(dt / (24 * 3600)) / 7)
+            xts = [t0 - timedelta(days=7 * i) for i in range(n_days)][::-1]
+            label_xts = [xt.strftime("%d %b") for xt in xts]
+        elif dt < 365.25 * 24 * 3600:
+            t0 = tf.replace(day=1, hour=0, minute=0, second=0)
+            n_months = int(np.ceil(dt / (24 * 3600 * 365.25 / 12)))
+            xts = [t0 - timedelta(days=i * 365.25 / 12) for i in range(n_months)][::-1]
+            label_xts = [xt.strftime("%b") for xt in xts]
+        # elif dt < 2 * 365.25 * 24 * 3600:
+        else:
+            t0 = tf.replace(day=1, hour=0, minute=0, second=0)
+            n_months = int(np.ceil(dt / (24 * 3600 * 365.25 / 12)) / 2)
+            xts = [t0 - timedelta(days=2 * i * 365.25 / 12) for i in range(n_months)][
+                ::-1
+            ]
+            label_xts = [xt.strftime("%b %Y") for xt in xts]
+
+        ax.set_xticks(xts)
+        ax.set_xticklabels(label_xts)
+
+        ax.set_xlim(xlim)
+        ax_.set_xlim(xlim)
+
+        bbox = dict(boxstyle="round", facecolor="wheat", alpha=0.5)
+
+        ax.text(
+            0.85,
+            0.95,
+            self.data.station + " " + label_vector.index[-1].strftime("%Y"),
+            size=12,
+            ha="left",
+            va="top",
+            transform=ax.transAxes,
+            bbox=bbox,
+        )
+
+        plt.savefig(save, dpi=400)
+        plt.close(f)
+
+    def _compute_confidence_interval(self, y):
+        """Computes a 95% confidence interval of the model consensus.
+        Parameters:
+        -----------
+        y : numpy.array
+            Model consensus returned by ForecastModel.forecast.
+
+        Returns:
+        --------
+        ci : numpy.array
+            95% confidence interval of the model consensus
+        """
+        confidence_interval = 1.96 * (np.sqrt(y * (1 - y) / self.number_of_classifiers))
+        return confidence_interval
+
+    def _load_data(
+        self, start_date: str = None, end_date: str = None, year: int = None
+    ) -> (pd.DataFrame, pd.DataFrame):
         # Return pre loaded
-        start_date: datetime = self.start_date_train
-        end_date: datetime = self.end_date_train
+        if start_date is None:
+            start_date: datetime = self.start_date_train
+
+        if end_date is None:
+            end_date: datetime = self.end_date_train
+
+        # Ensuring datetime object
+        start_date = to_datetime(start_date)
+        end_date = to_datetime(end_date)
 
         try:
             if (
@@ -584,7 +1064,8 @@ class ForecastModel:
                         number_of_windows, start_date, data_stream, index=label_3
                     )
                     feature_matrix = pd.concat(
-                        [feature_matrix_preloaded, _feature_matrix_new]
+                        [feature_matrix_preloaded, _feature_matrix_new],
+                        sort=True,
                     )
 
                     # sort new updated feature matrix and save (replace existing one)
@@ -597,7 +1078,7 @@ class ForecastModel:
                     feature_matrix.index.isin(label_1, level=0)
                 ]
                 #
-                del feature_matrix, label_1, label_2, label_3
+                del feature_matrix_preloaded, label_1, label_2, label_3
 
         else:
             ## create feature matrix from scratch
@@ -683,6 +1164,7 @@ class ForecastModel:
             "n_jobs": self.n_jobs,
             "default_fc_parameters": cfp,
             "impute_function": impute,
+            "show_warnings": self.show_warnings,
         }
 
         # construct_windows/extract_features for subsets
@@ -712,18 +1194,24 @@ class ForecastModel:
         data_stream,
         i0=0,
         i1=None,
-        index=None,
+        index: list = None,
     ):
+        if index is None:
+            index = []
         """
         Create overlapping data windows for feature extraction.
         """
         if i1 is None:
             i1 = number_of_windows
-        if not index:
+        if len(index) == 0:
             # get data for windowing period
             df = self.data.get_data(
                 start_date - self.dtw, start_date + (number_of_windows - 1) * self.dto
-            )[[data_stream]]
+            )[
+                [
+                    data_stream,
+                ]
+            ]
 
             # create windows
             dfs = []
@@ -737,7 +1225,9 @@ class ForecastModel:
                         np.ones(self.iw, dtype=int) * i, index=dfi.index
                     )
                 except ValueError as e:
-                    print(f"❌ _construct_windows :: This shouldn't be happening: {e}")
+                    raise ValueError(
+                        f"_construct_windows :: This shouldn't be happening: {e}"
+                    )
 
                 dfs.append(dfi)
 

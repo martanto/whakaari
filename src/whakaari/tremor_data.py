@@ -925,6 +925,10 @@ class TremorData:
         if not self.tremor_file_exists:
             if self.verbose:
                 print(f"Creating new tremor data...")
+
+            output_dir = os.path.join(os.getcwd(), "output")
+            os.makedirs(output_dir, exist_ok=True)
+
             df = pd.DataFrame(columns=self.cols)
             df.to_csv(self.tremor_file, index_label="time")
             if self.verbose:

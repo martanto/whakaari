@@ -6,6 +6,7 @@ import numpy as np
 import os, joblib
 
 from datetime import datetime
+from dateutil import tz
 from numpy import ndarray
 from pandas import Timestamp
 from obspy import UTCDateTime
@@ -415,3 +416,57 @@ def train_one_model(
     )
     model_cv.fit(fmt, yst)
     _ = joblib.dump(model_cv.best_estimator_, fl, compress=3)
+
+
+def predict_one_model(feature_matrix, model_path, _flp):
+    file_model, file_prediction = _flp
+
+    print(f"FLP : {file_model}")
+    print(f"FL : {file_prediction}")
+
+    number = file_model.split(os.sep)[-1].split(".")[0].split("_")[-1]
+    model = joblib.load(file_model)
+
+    feature_path = os.path.join(model_path, f"{number}.fts")
+    with open(feature_path) as fp:
+        lns = fp.readlines()
+
+    fts = [" ".join(ln.rstrip().split()[1:]) for ln in lns]
+
+    print(fts)
+
+    if not os.path.isfile(file_prediction):
+        # simulate predicton period
+        yp = model.predict(feature_matrix[fts])
+        # save prediction
+        ypdf = pd.DataFrame(
+            yp, columns=["pred{:s}".format(number)], index=feature_matrix.index
+        )
+    else:
+        ypdf0 = load_dataframe(
+            file_prediction,
+            index_col="time",
+            infer_datetime_format=True,
+            parse_dates=["time"],
+        )
+
+        fm2 = feature_matrix.loc[feature_matrix.index > ypdf0.index[-1], fts]
+        if fm2.shape[0] == 0:
+            ypdf = ypdf0
+        else:
+            yp = model.predict(fm2)
+            ypdf = pd.DataFrame(
+                yp, columns=["pred{:s}".format(number)], index=fm2.index
+            )
+            ypdf = pd.concat([ypdf0, ypdf])
+
+    # ypdf.to_csv(fl, index=True, index_label='time')
+    save_dataframe(ypdf, file_prediction, index=True, index_label="time")
+    return ypdf
+
+
+def to_nz_timezone(t):
+    """Routine to convert UTC to NZ time zone."""
+    utc_tz = tz.gettz("UTC")
+    nz_tz = tz.gettz("Pacific/Auckland")
+    return [ti.replace(tzinfo=utc_tz).astimezone(nz_tz) for ti in pd.to_datetime(t)]
