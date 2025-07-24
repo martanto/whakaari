@@ -14,3 +14,4 @@ _tmp_BTP/
 /output_bak
 *.csv
 /output/_extract_features
+/dist

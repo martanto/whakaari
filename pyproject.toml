@@ -14,7 +14,7 @@ maintainers = [
 description = "Whakaari Forecast Modelling"
 readme = "README.md"
 license = {file = "LICENSE"}
-keywords = ["whakaari", "forecast", "modelling"]
+keywords = ["whakaari", "forecast", "modelling","volcano","volcanoes"]
 requires-python = ">=3.7.6"
 
 dependencies = [
