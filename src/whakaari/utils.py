@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
-import pickle
 import numpy as np
-import os, joblib
+import os, joblib, sys, pickle
 
+
+from .const import CLASSIFIERS
 from datetime import datetime
 from dateutil import tz
 from numpy import ndarray
@@ -21,6 +22,24 @@ from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV, ShuffleSplit
 from tsfresh.transformers import FeatureSelector
 from imblearn.under_sampling import RandomUnderSampler
+
+
+def progress_bar(
+    current_iteration: int,
+    total: int,
+    prefix: str = "",
+    suffix: str = "",
+    decimals: int = 1,
+    length: int = 25,
+    fill: str = "█",
+) -> None:
+    percent = ("{0:." + str(decimals) + "f}").format(
+        100 * (current_iteration / float(total))
+    )
+    filled_length = int(length * current_iteration // total)
+    bar = fill * filled_length + "-" * (length - filled_length)
+    sys.stdout.write(f"\r{prefix} |{bar}| {percent}% {suffix}")
+    sys.stdout.flush()
 
 
 def to_datetime(datetime_str) -> datetime:
@@ -421,8 +440,8 @@ def train_one_model(
 def predict_one_model(feature_matrix, model_path, _flp):
     file_model, file_prediction = _flp
 
-    print(f"FLP : {file_model}")
-    print(f"FL : {file_prediction}")
+    # print(f"File Model : {file_model}")
+    # print(f"File Prediction : {file_prediction}")
 
     number = file_model.split(os.sep)[-1].split(".")[0].split("_")[-1]
     model = joblib.load(file_model)
@@ -432,8 +451,6 @@ def predict_one_model(feature_matrix, model_path, _flp):
         lns = fp.readlines()
 
     fts = [" ".join(ln.rstrip().split()[1:]) for ln in lns]
-
-    print(fts)
 
     if not os.path.isfile(file_prediction):
         # simulate predicton period
@@ -470,3 +487,11 @@ def to_nz_timezone(t):
     utc_tz = tz.gettz("UTC")
     nz_tz = tz.gettz("Pacific/Auckland")
     return [ti.replace(tzinfo=utc_tz).astimezone(nz_tz) for ti in pd.to_datetime(t)]
+
+
+def classifier_codes():
+    codes = []
+    for classifier in CLASSIFIERS:
+        codes.append(classifier["code"])
+
+    return codes

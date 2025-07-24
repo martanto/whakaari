@@ -5,11 +5,12 @@ features/
 predictions/
 plots/
 controller/
-_tmp/
+_tmp_BTP/
 .vscode/
 .idea/
 *.png
 /download
 /input
-/output
+/output_bak
 *.csv
+/output/_extract_features

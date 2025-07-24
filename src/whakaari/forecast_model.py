@@ -3,6 +3,8 @@ from __future__ import annotations
 import os, gc, pathlib
 import pandas as pd
 import numpy as np
+import sys
+import traceback
 from matplotlib import pyplot as plt
 from fnmatch import fnmatch
 from glob import glob
@@ -15,6 +17,7 @@ from .utils import (
     train_one_model,
     predict_one_model,
     to_nz_timezone,
+    classifier_codes,
 )
 from datetime import datetime, timedelta
 from tsfresh import extract_features
@@ -22,9 +25,6 @@ from tsfresh.utilities.dataframe_functions import impute
 from tsfresh.feature_extraction.settings import ComprehensiveFCParameters
 from functools import partial
 from multiprocessing import Pool
-
-
-ALL_CLASSIFIERS = ["SVM", "KNN", "DT", "RF", "NN", "NB", "LR"]
 
 
 class ForecastModel:
@@ -37,7 +37,7 @@ class ForecastModel:
         Station name.
     start_date : str
         Beginning of analysis period. If not given, will default to beginning of tremor data.
-    end_date : dict
+    end_date : str
         End of analysis period. If not given, will default to end of tremor data.
     window : int
         Length of data window in days.
@@ -50,7 +50,6 @@ class ForecastModel:
         where X is one of 'rsam', 'mf', 'hf', or 'dsar'.
     verbose : bool
         Enable additional print statements.
-
     """
 
     def __init__(
@@ -72,6 +71,7 @@ class ForecastModel:
         savefile_type="pkl",
         show_warnings: bool = False,
         verbose: bool = False,
+        debug: bool = False,
     ):
         """Object for train and running forecast models.
 
@@ -93,6 +93,7 @@ class ForecastModel:
             data_streams = ["rsam", "mf", "hf", "dsar"]
 
         self.verbose = verbose
+        self.debug = debug
         self.show_warnings = show_warnings
         self.station = station
         self.data_streams = data_streams
@@ -103,6 +104,7 @@ class ForecastModel:
 
         self.eruptive_file = eruptive_file
         self.savefile_type = savefile_type
+        self.tremor_data_file = tremor_data_file
 
         self.data: TremorData = TremorData(
             station=station,
@@ -231,6 +233,7 @@ class ForecastModel:
         self.label_vector = pd.DataFrame()
         self.start_date_forecast = None
         self.end_date_forecast = None
+        self.classifier_codes = classifier_codes()
 
         if verbose:
             print(f"Start date: {self.start_date_model.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -273,10 +276,9 @@ class ForecastModel:
             n_jobs (int): Number of jobs. Defaults to 2.
             exclude_dates (list[list[str]): list of dates to exclude features. Example: [['2012-06-01','2012-08-01'],
                 ['2015-01-01','2016-01-01']] will drop Jun-Aug 2012 and 2015-2016 from analysis. Defaults to None.
-            method (float): Method to use for feature selection. Defaults to 0.75.
+            method (float): Method to handle undersample data. Defaults to 0.75.
             use_features (list[str]): list of features to use for feature selection. Defaults to None.
             show_warnings (bool): Whether to show the warnings message. Defaults to False.
-
 
             Classifier options:
             -------------------
@@ -291,7 +293,11 @@ class ForecastModel:
         Returns:
             self (Self): Self
         """
-        self.classifier = classifier
+        assert (
+            classifier.upper() in self.classifier_codes
+        ), f"❌ Classifier must be one of {self.classifier_codes}"
+
+        self.classifier = classifier.upper()
         self.exclude_dates = exclude_dates
         self.use_features = use_features
         self.n_jobs = n_jobs
@@ -375,7 +381,7 @@ class ForecastModel:
         if self.n_jobs == 1:
             mapper = map
 
-        f = partial(
+        _train_one_model = partial(
             train_one_model,
             feature_matrix,
             label_vector,
@@ -388,8 +394,8 @@ class ForecastModel:
         )
 
         # train models with glorious progress bar
-        # f(0)
-        for i, _ in enumerate(mapper(f, range(number_of_classifiers))):
+        # _train_one_model(0)
+        for i, _ in enumerate(mapper(_train_one_model, range(number_of_classifiers))):
             _classifier = (i + 1) / number_of_classifiers
             print(
                 f'building models: [{"#" * round(50 * _classifier) + "-" * round(50 * (1 - _classifier))}] {100. * _classifier:.2f}%\r',
@@ -426,7 +432,7 @@ class ForecastModel:
             )
 
         self.classifier = []
-        for classifier in ALL_CLASSIFIERS:
+        for classifier in self.classifier_codes:
             model = get_classifier(classifier)[0]
             prefix = type(model).__name__
             if all(
@@ -441,6 +447,115 @@ class ForecastModel:
                 return True
 
         raise ValueError(f"❌ Did not recognise models in '{model_path}'")
+
+    def _load_data(
+        self, start_date: str = None, end_date: str = None, year: int = None
+    ) -> (pd.DataFrame, pd.DataFrame):
+        # Return pre loaded
+        if start_date is None:
+            start_date: datetime = self.start_date_train
+
+        if end_date is None:
+            end_date: datetime = self.end_date_train
+
+        # Ensuring datetime object
+        start_date = to_datetime(start_date)
+        end_date = to_datetime(end_date)
+
+        try:
+            if (
+                start_date == self.start_date_previous
+                and end_date == self.end_date_previous
+            ):
+                return self.feature_matrix, self.label_vector
+        except AttributeError:
+            pass
+
+        # range checking
+        if end_date > self.data.datetime_end:
+            raise ValueError(
+                "❌ Model end date '{:s}' beyond data range '{:s}'".format(
+                    end_date, self.data.datetime_end
+                )
+            )
+
+        if start_date < self.data.datetime_start:
+            raise ValueError(
+                "❌ Model start date '{:s}' predates data range '{:s}'".format(
+                    start_date, self.data.datetime_start
+                )
+            )
+
+        date_range = [start_date, end_date]
+        if year is None:
+            date_range = [
+                datetime(*[_year, 1, 1, 0, 0, 0])
+                for _year in list(range(start_date.year + 1, end_date.year + 1))
+            ]
+            if start_date - self.dtw < self.data.datetime_start:
+                start_date = self.data.datetime_start + self.dtw
+            date_range.insert(0, start_date)
+            date_range.append(end_date)
+
+        _feature_matrix = []
+        ysa = []
+
+        for data_stream in self.data_streams:
+            i = 0
+            fma = []
+            ysa = []
+            for time_start, time_end in zip(date_range[:-1], date_range[1:]):
+                fmi, ysi = self._extract_features(
+                    time_start, time_end - self.dt, data_stream
+                )
+                i += 1
+                if i == 2:
+                    pass
+
+                fma.append(fmi)
+                ysa.append(ysi)
+            fma = pd.concat(fma)
+            _feature_matrix.append(fma)
+
+            if self.debug:
+                _feature_matrix_dir = os.path.join(self.output_dir, "_feature_matrix")
+                os.makedirs(_feature_matrix_dir, exist_ok=True)
+
+                _feature_matrix_filename = f"{data_stream}.csv"
+                _feature_matrix_path = os.path.join(
+                    _feature_matrix_dir, _feature_matrix_filename
+                )
+
+                fma.to_csv(_feature_matrix_path)
+
+                print(f"🔨 Feature Matrix saved to {_feature_matrix_path}")
+
+        # concat list of fM and ysa
+        if len(ysa) == 0:
+            raise ValueError(f"_load_data > ysa : ysa value is {len(ysa)}")
+
+        if self.debug:
+            print(_feature_matrix)
+
+        _label_vector = pd.concat(ysa)
+        _feature_matrix = pd.concat(_feature_matrix, axis=1, sort=False)
+
+        if len(_feature_matrix) == 0:
+            raise ValueError(
+                f"❌ Feature matrix is empty. Tremor data start date is {start_date}. Forecast period is {self.start_date_forecast} - {self.end_date_forecast}"
+            )
+
+        del fmi, ysi, fma, ysa
+        self.start_date_previous = start_date
+        self.end_date_previous = end_date
+        self.feature_matrix = _feature_matrix
+        self.label_vector = _label_vector
+
+        if self.debug:
+            print(f"🔨 Length of feature matrix: {len(_feature_matrix)}")
+            print(f"🔨 Length of label vector: {len(_label_vector)}")
+
+        return _feature_matrix, _label_vector
 
     def forecast(
         self,
@@ -501,10 +616,18 @@ class ForecastModel:
 
         model, classifier = get_classifier(self.classifier)
 
+        if self.debug:
+            print(f"🔨 Model: {model}")
+            print(f"🔨 Classifier: {classifier}")
+
         # logic to determine which models need to be run and which to be
         # read from disk
         prefix = type(model).__name__
         models = glob(os.path.join(model_path, f"{prefix}_*.pkl"))
+
+        if self.debug:
+            print(f"🔨 Models found: {len(models)}", end="\n\n")
+
         run_predictions = []
         ys = []
         start_date_list = []
@@ -512,14 +635,19 @@ class ForecastModel:
         # create a prediction for each model
         for model in models:
             # change location
-            prediction_model = model.replace(model_path, self.prediction_dir + os.sep)
+            prediction_model = model.replace(model_path, self.prediction_dir)
             # update filetype
             prediction_model_path = prediction_model.replace(
                 ".pkl", "{:s}.{:s}".format(year_str, self.savefile_type)
             )
 
+            prediction_model_path = os.path.join(prediction_model_path)
+
             # check if prediction already exists
             if os.path.isfile(prediction_model_path):
+                if self.debug:
+                    print(f"🔨 Prediction model found: {prediction_model_path}")
+
                 if recalculate:
                     # delete predictions to be recalculated
                     os.remove(prediction_model_path)
@@ -537,9 +665,15 @@ class ForecastModel:
                     if y.index[-1] < self.start_date_forecast:
                         run_predictions.append([model, prediction_model_path])
                         start_date_list.append(y.index[-1])
+
+                        if self.debug:
+                            print(f"🔨 Predictions found: {len(run_predictions)}")
                     else:
                         ys.append(y)
             else:
+                # if self.debug:
+                #     print(f"🔨 Prediction model not found: {prediction_model_path}")
+
                 run_predictions.append([model, prediction_model_path])
                 start_date_list.append(self.start_date_forecast)
 
@@ -549,12 +683,9 @@ class ForecastModel:
         # generate new predictions
         if len(run_predictions) > 0:
             # load feature matrix
-            fM, _ = self._load_data(start_date, self.start_date_forecast, year)
-
-            if len(fM) == 0:
-                raise ValueError(
-                    f"❌ Feature matrix is empty. Start date is {start_date}. Forecast period is {self.start_date_forecast}"
-                )
+            feature_matrix, _ = self._load_data(
+                start_date, self.end_date_forecast, year
+            )
 
             # setup predictor
             p = Pool(n_jobs)
@@ -563,7 +694,7 @@ class ForecastModel:
             else:
                 mapper = map
 
-            predict_function = partial(predict_one_model, fM, model_path)
+            predict_function = partial(predict_one_model, feature_matrix, model_path)
 
             # run models with glorious progress bar
             predict_function(run_predictions[0])
@@ -593,13 +724,14 @@ class ForecastModel:
         consensus = np.mean(
             [ys[col].values for col in ys.columns if "pred" in col], axis=0
         )
-        forecast = pd.DataFrame(consensus, columns=["consensus"], index=ys.index)
 
+        # save consensus file
+        forecast = pd.DataFrame(consensus, columns=["consensus"], index=ys.index)
         save_dataframe(forecast, consensus_file, index=True, index_label="time")
 
         # memory management
         if len(run_predictions) > 0:
-            del fM
+            del feature_matrix
             gc.collect()
 
         return forecast
@@ -614,9 +746,10 @@ class ForecastModel:
         nz_timezone: bool = False,
         n_jobs: int = None,
         threshold: float = 0.8,
-        xlim: list = None,
+        x_lim: list = None,
     ):
         """Construct forecast at resolution of data.
+
         Parameters:
         -----------
         start_date : str, datetime.datetime
@@ -630,20 +763,28 @@ class ForecastModel:
             If given, plot forecast and save to filename.
         root : None or str
             Naming convention for saving feature matrix.
-        nztimezone : bool
+        nz_timezone : bool
             Flag to plot forecast using NZ time zone instead of UTC.
         n_jobs : int
             CPUs to use when forecasting in parallel.
+        threshold: float
+            Threshold for forecasting.
+        x_lim : list
+            X-axis limits.
+
         Notes:
         ------
-        Requires model to have already been trained.
+        Requires to be trained model.
         """
         # error checking
         if self.start_date_train is None:
             raise ValueError("❌ Train model before constructing hi-res forecast.")
 
         if save is None:
-            save = os.path.join(self.plot_dir, "hires_forecast.png")
+            save = os.path.join(
+                self.plot_dir,
+                f"hires_forecast_{self.station}_{start_date}-{end_date}.png",
+            )
 
         if n_jobs is not None:
             self.n_jobs = n_jobs
@@ -653,18 +794,22 @@ class ForecastModel:
             root = f"{self.root}_hires"
 
         _fm = ForecastModel(
-            window=self.window,
             station=self.station,
-            eruptive_file=self.eruptive_file,
             start_date=start_date,
             end_date=end_date,
+            window=self.window,
             overlap=1.0,
             look_forward=self.look_forward,
+            eruptive_file=self.eruptive_file,
+            tremor_data_file=self.tremor_data_file,
             data_streams=self.data_streams,
             root=root,
-            savefile_type=self.savefile_type,
             feature_root=root,
             feature_dir=self.feature_dir,
+            n_jobs=self.n_jobs,
+            savefile_type=self.savefile_type,
+            verbose=self.verbose,
+            debug=self.debug,
         )
 
         _fm.compute_only_features = list(
@@ -687,7 +832,7 @@ class ForecastModel:
                 save,
                 threshold,
                 nz_timezone=nz_timezone,
-                xlim=xlim,
+                xlim=x_lim,
             )
 
         return label_vector
@@ -862,91 +1007,6 @@ class ForecastModel:
         confidence_interval = 1.96 * (np.sqrt(y * (1 - y) / self.number_of_classifiers))
         return confidence_interval
 
-    def _load_data(
-        self, start_date: str = None, end_date: str = None, year: int = None
-    ) -> (pd.DataFrame, pd.DataFrame):
-        # Return pre loaded
-        if start_date is None:
-            start_date: datetime = self.start_date_train
-
-        if end_date is None:
-            end_date: datetime = self.end_date_train
-
-        # Ensuring datetime object
-        start_date = to_datetime(start_date)
-        end_date = to_datetime(end_date)
-
-        try:
-            if (
-                start_date == self.start_date_previous
-                and end_date == self.end_date_previous
-            ):
-                return self.feature_matrix, self.label_vector
-        except AttributeError:
-            pass
-
-        # range checking
-        if end_date > self.data.datetime_end:
-            raise ValueError(
-                "❌ Model end date '{:s}' beyond data range '{:s}'".format(
-                    end_date, self.data.datetime_end
-                )
-            )
-        if start_date < self.data.datetime_start:
-            raise ValueError(
-                "❌ Model start date '{:s}' predates data range '{:s}'".format(
-                    start_date, self.data.datetime_start
-                )
-            )
-
-        date_range = [start_date, end_date]
-        if year is None:
-            date_range = [
-                datetime(*[_year, 1, 1, 0, 0, 0])
-                for _year in list(range(start_date.year + 1, end_date.year + 1))
-            ]
-            if start_date - self.dtw < self.data.datetime_start:
-                start_date = self.data.datetime_start + self.dtw
-            date_range.insert(0, start_date)
-            date_range.append(end_date)
-
-        _feature_matrix = []
-
-        ysa = []
-        for data_stream in self.data_streams:
-            i = 0
-            fma = []
-            ysa = []
-            for time_start, time_end in zip(date_range[:-1], date_range[1:]):
-                fmi, ysi = self._extract_features(
-                    time_start, time_end - self.dt, data_stream
-                )
-                i += 1
-                if i == 2:
-                    pass
-                fma.append(fmi)
-                ysa.append(ysi)
-            fma = pd.concat(fma)
-            _feature_matrix.append(fma)
-
-        # concat list of fM and ysa
-        if len(ysa) == 0:
-            raise ValueError(f"_load_data > ysa : ysa value is {len(ysa)}")
-
-        _label_vector = pd.concat(ysa)
-        _feature_matrix = pd.concat(_feature_matrix, axis=1, sort=False)
-
-        del fmi, ysi, fma, ysa
-        self.start_date_previous = start_date
-        self.end_date_previous = end_date
-        self.feature_matrix = _feature_matrix
-        self.label_vector = _label_vector
-
-        if len(_feature_matrix) > 0:
-            return _feature_matrix, _label_vector
-
-        return pd.DataFrame(), pd.DataFrame()
-
     def _extract_features(
         self,
         start_date: datetime,
@@ -960,11 +1020,24 @@ class ForecastModel:
         ------
         Saves feature matrix to $rootdir/features/$root_features.csv to avoid recalculation.
         """
+        # print(f"start_date = {start_date}")
+        # print(f"end_date = {end_date}")
+        # print(f"data_stream = {data_stream}", end="\n\n")
+
         # number of windows in feature request
         # orginally Nw
-        number_of_windows = (
-            int(np.floor(((end_date - start_date) / self.dt) / (self.iw - self.io))) + 1
-        )
+        ceiled = np.ceil(((end_date - start_date) / self.dt) / (self.iw - self.io))
+        number_of_windows = int(ceiled) + 1
+
+        if self.debug:
+            print("---- Extracting features ---")
+            print(f"data_stream = {data_stream}")
+            print(f"start_date = {start_date}")
+            print(f"end_date = {end_date}")
+            print(f"end_date - start_date : {end_date-start_date}")
+            print(f"self.dt : {self.dt}")
+            print(f"Nw floored : {ceiled}")
+            print("---- Features Extracted ---", end="\n\n")
 
         # max number of construct windows per iteration (6*24*30 windows: ~ a month of hires, overlap of 1.)
         max_number_of_windows = 6 * 24 * 31
@@ -973,11 +1046,18 @@ class ForecastModel:
         year = start_date.year
         feature_file = self._feature_file(data_stream, year)
 
+        if self.debug:
+            print(f"🔨 Feature matrix: {feature_file}")
+
         feature_matrix = pd.DataFrame()
 
         # condition on the existence of fm save for the year requested
-        if os.path.isfile(feature_file):  # check if feature matrix file exists
+        if os.path.isfile(feature_file):
+            # check if feature matrix file exists
             # load existing feature matrix
+            if self.debug:
+                print(f"🔨 Feature file exists in : {feature_file}")
+
             feature_matrix_preloaded = load_dataframe(
                 feature_file,
                 index_col=0,
@@ -985,6 +1065,12 @@ class ForecastModel:
                 infer_datetime_format=True,
                 header=0,
             )
+
+            if self.debug:
+                print(
+                    f"🔨 Length of preloaded feature matrix  : {len(feature_matrix_preloaded)}",
+                    end="\n\n",
+                )
 
             # request for features, labeled by index
             label_1 = [
@@ -1002,6 +1088,7 @@ class ForecastModel:
                 usecols=["time"],
                 infer_datetime_format=True,
             ).index.values
+
             label_3 = []
             [
                 label_3.append(index_label_1.astype(datetime))
@@ -1025,6 +1112,10 @@ class ForecastModel:
                 if len(label_3) >= max_number_of_windows:
                     # condition on length of requested windows
                     # divide l3 in subsets
+
+                    if self.debug:
+                        print(f">>> L3 >= Nmax: {len(label_3)}")
+
                     n_sbs = int(number_of_windows / max_number_of_windows) + 1
 
                     def chunks(_list, n):
@@ -1051,6 +1142,7 @@ class ForecastModel:
                         feature_matrix: pd.DataFrame = pd.concat(
                             [_feature_matrix_preloaded, _feature_matrix_new]
                         )
+
                         del _feature_matrix_new
 
                         # sort new updated feature matrix and save (replace existing one)
@@ -1059,13 +1151,15 @@ class ForecastModel:
                             feature_matrix, feature_file, index=True, index_label="time"
                         )
                 else:
+                    if self.debug:
+                        print(f"<<< L3 < Nmax: {len(label_3)}")
+
                     # generate dataframe
                     _feature_matrix_new = self._construct_windows_extract_feature(
                         number_of_windows, start_date, data_stream, index=label_3
                     )
                     feature_matrix = pd.concat(
-                        [feature_matrix_preloaded, _feature_matrix_new],
-                        sort=True,
+                        [feature_matrix_preloaded, _feature_matrix_new]
                     )
 
                     # sort new updated feature matrix and save (replace existing one)
@@ -1073,6 +1167,7 @@ class ForecastModel:
                     save_dataframe(
                         feature_matrix, feature_file, index=True, index_label="time"
                     )
+
                 # keep in feature matrix (in memory) only the requested windows
                 feature_matrix = feature_matrix[
                     feature_matrix.index.isin(label_1, level=0)
@@ -1082,6 +1177,8 @@ class ForecastModel:
 
         else:
             ## create feature matrix from scratch
+            if self.debug:
+                print(f"🔨 Feature file not exists. Create feature matrix from scratch.")
             year = start_date.year
             feature_file = self._feature_file(data_stream, year)
 
@@ -1116,6 +1213,7 @@ class ForecastModel:
                     feature_matrix = pd.concat([feature_matrix, fm_new])
                     # increase aux ti
                     ti_aux = ti_aux + index_number_of_windows * self.dto
+
                 save_dataframe(
                     feature_matrix, feature_file, index=True, index_label="time"
                 )
@@ -1182,7 +1280,9 @@ class ForecastModel:
             os.makedirs(_path, exist_ok=True)
 
             _start_date = start_date.strftime("%Y-%m-%d")
-            _save_path = os.path.join(_path, f"{data_stream}_{_start_date}.xlsx")
+            _save_path = os.path.join(
+                _path, f"{self.station}_{data_stream}_{_start_date}.xlsx"
+            )
             feature_matrix.to_excel(_save_path)
 
         return feature_matrix
@@ -1246,7 +1346,9 @@ class ForecastModel:
                         np.ones(self.iw, dtype=int) * i, index=dfi.index
                     )
                 except ValueError as e:
+                    _, _, tb = sys.exc_info()
                     print(f"❌ _construct_windows :: This shouldn't be happening: {e}")
+
                 dfs.append(dfi)
             df = pd.concat(dfs)
             window_dates = index
@@ -1255,11 +1357,13 @@ class ForecastModel:
     def _extract_features_x(self, df: pd.DataFrame, **kw) -> pd.DataFrame:
         t0 = df.index[0] + self.dtw
         t1 = df.index[-1] + self.dt
-        print(
-            "{:s} feature extraction {:s} to {:s}".format(
-                df.columns[0], t0.strftime("%Y-%m-%d"), t1.strftime("%Y-%m-%d")
+
+        if self.verbose:
+            print(
+                "{:s} feature extraction {:s} to {:s}".format(
+                    df.columns[0], t0.strftime("%Y-%m-%d"), t1.strftime("%Y-%m-%d")
+                )
             )
-        )
 
         # tsfresh extract features
         return extract_features(df, **kw)
@@ -1359,23 +1463,25 @@ class ForecastModel:
         if save is None:
             save = os.path.join(self.model_dir, "all.fts")
 
-        feats = []
-        fls = glob(os.path.join(self.model_dir, "*.fts"))
-        for i, fl in enumerate(fls):
-            if fl.split(os.sep)[-1].split(".")[0] in ["all", "ranked"]:
-                continue
-            with open(fl) as fp:
-                lns = fp.readlines()
-            feats += [" ".join(ln.rstrip().split()[1:]) for ln in lns]
+        features = []
+        feature_files = glob(os.path.join(self.model_dir, "*.fts"))
 
-        labels = list(set(feats))
-        freqs = [feats.count(label) for label in labels]
-        labels = [label for _, label in sorted(zip(freqs, labels))][::-1]
-        freqs = sorted(freqs)[::-1]
+        for index, feature_file in enumerate(feature_files):
+            if feature_file.split(os.sep)[-1].split(".")[0] in ["all", "ranked"]:
+                continue
+            with open(feature_file) as fp:
+                lines = fp.readlines()
+            features += [" ".join(ln.rstrip().split()[1:]) for ln in lines]
+
+        labels = list(set(features))
+        frequencies = [features.count(label) for label in labels]
+        labels = [label for _, label in sorted(zip(frequencies, labels))][::-1]
+        frequencies = sorted(frequencies)[::-1]
+
         # write out feature frequencies
         with open(save, "w") as fp:
             _ = [
                 fp.write("{:d},{:s}\n".format(freq, ft))
-                for freq, ft in zip(freqs, labels)
+                for freq, ft in zip(frequencies, labels)
             ]
-        return labels, freqs
+        return labels, frequencies

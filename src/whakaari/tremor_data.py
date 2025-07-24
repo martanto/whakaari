@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from multiprocessing import Pool
 from time import sleep
 from typing import List
+from copy import deepcopy
+from whakaari.const import STATIONS, FREQ_BANDS, RATIO_NAMES, BAND_NAMES
 
 import numpy as np
 import pandas as pd
@@ -18,7 +20,7 @@ from obspy.signal.filter import bandpass
 from scipy.integrate import cumtrapz
 from scipy.signal import stft
 
-from .utils import (
+from whakaari.utils import (
     to_datetime,
     load_dataframe,
     find_outliers,
@@ -27,105 +29,8 @@ from .utils import (
     save_dataframe,
 )
 
-STATIONS = {
-    "WIZ": {
-        "client_name": "GEONET",
-        "nrt_name": "https://service.geonet.org.nz",
-        "channel": "HHZ",
-        "network": "NZ",
-        "location": "*",
-    },
-    "KRVZ": {
-        "client_name": "GEONET",
-        "nrt_name": "https://service-nrt.geonet.org.nz",
-        "channel": "EHZ",
-        "network": "NZ",
-        "location": "*",
-    },
-    "FWVZ": {
-        "client_name": "GEONET",
-        "nrt_name": "https://service-nrt.geonet.org.nz",
-        "channel": "HHZ",
-        "network": "NZ",
-        "location": "*",
-    },
-    "PVV": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "EHZ",
-        "network": "AV",
-        "location": "*",
-    },
-    "PV6": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "EHZ",
-        "network": "AV",
-        "location": "*",
-    },
-    "OKWR": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "EHZ",
-        "network": "AV",
-        "location": "*",
-    },
-    "VNSS": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "EHZ",
-        "network": "AV",
-        "location": "*",
-    },
-    "SSLW": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "EHZ",
-        "network": "AV",
-        "location": "*",
-    },
-    "REF": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "EHZ",
-        "network": "AV",
-        "location": "*",
-    },
-    "BELO": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "HHZ",
-        "network": "YC",
-        "location": "*",
-    },
-    "CRPO": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "HHZ",
-        "network": "OV",
-        "location": "*",
-    },
-    "IVGP": {
-        "client_name": "https://webservices.ingv.it",
-        "nrt_name": "https://webservices.ingv.it",
-        "channel": "HHZ",
-        "network": "IV",
-        "location": "*",
-    },
-    "AUS": {
-        "client_name": "IRIS",
-        "nrt_name": "https://service.iris.edu",
-        "channel": "EHZ",
-        "network": "AV",
-        "location": "*",
-    },
-}
-
 
 class TremorData:
-    RATIO_NAMES = ["vlar", "lrar", "rmar", "dsar"]
-    BAND_NAMES = ["vlf", "lf", "rsam", "mf", "hf"]
-
     def __init__(
         self,
         station: str,
@@ -144,13 +49,7 @@ class TremorData:
         self.parent = parent
 
         self._stations = STATIONS
-        self._freq_bands: List[List[float]] = [
-            [0.01, 0.1],
-            [0.1, 2],
-            [2, 5],
-            [4.5, 8],
-            [8, 16],
-        ]
+        self._freq_bands: List[List[float]] = FREQ_BANDS
         self._channel = "*"
 
         self.data_dir = data_dir
@@ -177,10 +76,10 @@ class TremorData:
         ), f"{self.eruptive_file} does not exist"
 
         self.cols = (
-            self.RATIO_NAMES
-            + [f"{ratio_name}F" for ratio_name in self.RATIO_NAMES]
-            + self.BAND_NAMES
-            + [f"{band_name}F" for band_name in self.BAND_NAMES]
+            RATIO_NAMES
+            + [f"{ratio_name}F" for ratio_name in RATIO_NAMES]
+            + BAND_NAMES
+            + [f"{band_name}F" for band_name in BAND_NAMES]
         )
 
         self.tes: List[datetime] = []
@@ -436,14 +335,14 @@ class TremorData:
 
         if self.verbose:
             print(
-                f"✍️ Checking FDSN Client connection using {_station['client_name']} from {_station['nrt_name']}"
+                f"✍️ Checking FDSN Client connection using {_station['client_name']} from {_station['client_url']}"
             )
 
         attempts = 0
         while attempts < 10:
             try:
                 self.client = FDSNClient(_station["client_name"])
-                self.client_nrt = FDSNClient(_station["nrt_name"])
+                self.client_nrt = FDSNClient(_station["client_url"])
             except FDSNException:
                 if attempts > 9:
                     raise FDSNException(
@@ -536,34 +435,57 @@ class TremorData:
     def download_from_sds(
         self, sds_dir: str, utc_datetime: UTCDateTime, station: str
     ) -> Stream:
-        year = utc_datetime.year
-        julian_day = utc_datetime.strftime("%j")
         stations = self.stations[station]
         network = stations["network"]
         location = stations["location"]
         channel = stations["channel"]
         channel_type = "D"
 
-        filename = f"{network}.{station}.{location}.{channel}.{channel_type}.{year}.{julian_day}"
+        # Save stream from previous, current, and next day
+        streams = {"previous": Stream(), "current": Stream(), "next": Stream()}
 
-        # SDS Path
-        miniseed_file = os.path.join(
-            sds_dir,
-            str(year),
-            network,
-            station,
-            f"{channel}.{channel_type}",
-            filename,
-        )
+        for day in [-1, 0, 1]:
+            _calculate_date = utc_datetime + timedelta(days=day)
+            year = _calculate_date.year
+            julian_day = _calculate_date.strftime("%j")
 
-        # Checking file exists
-        if not os.path.isfile(miniseed_file):
-            print(f"❌ File not found :: {miniseed_file}")
+            filename = f"{network}.{station}.{location}.{channel}.{channel_type}.{year}.{julian_day}"
+
+            # SDS Path
+            miniseed_file = os.path.join(
+                sds_dir,
+                str(year),
+                network,
+                station,
+                f"{channel}.{channel_type}",
+                filename,
+            )
+
+            if day == -1:
+                label = "previous"
+            elif day == 0:
+                label = "current"
+            else:
+                label = "next"
+
+            try:
+                stream = read(miniseed_file, format="MSEED")
+                streams[label] = stream
+            except Exception as e:
+                streams[label] = Stream()
+                continue
+
+        try:
+            st = deepcopy(streams["previous"] + streams["current"] + streams["next"])
+
+            try:
+                st = st.merge(fill_value="interpolate")
+            except Exception:
+                st = st.interpolate(100).merge(fill_value="interpolate")
+
+            return st
+        except Exception as _:
             return Stream()
-
-        # Load miniseed
-        st = read(miniseed_file, format="MSEED")
-        return st
 
     def get_data_for_day(
         self, index: int, date: datetime, station: str, sds_dir: str = None
@@ -578,7 +500,7 @@ class TremorData:
         _date = UTCDateTime(date)
         day_second = 24 * 3600
         freq_bands = self.freq_bands
-        band_names = self.BAND_NAMES
+        band_names = BAND_NAMES
         frs = [200, 200, 200, 100, 50]
 
         frequency = 100
@@ -588,15 +510,16 @@ class TremorData:
         if sds_dir is None:
             st = self.download(index, _date, station)
         else:
+            # TODO
             # Need to be modifed
-            st = self.download_from_sds(sds_dir, _date + timedelta(index), station)
+            st = self.download_from_sds(sds_dir, _date + timedelta(days=index), station)
 
         if len(st) == 0:
             return None
 
         # Pre-processing stream
         if self.verbose:
-            print(f"📶 Pre-processing data, apply filter...")
+            print(f"📶 [Index: {index:05d}] Pre-processing data, apply filter...")
 
         st = st.merge(method="interpolate")
 
@@ -607,13 +530,16 @@ class TremorData:
         trace = st.traces[0]
 
         # Checking data length
-        i0 = (
-            int(
-                (_date + (index * day_second) - st.traces[0].meta["starttime"])
-                * frequency
-            )
-            + 1
-        )
+        _meta_starttime = st.traces[0].meta["starttime"]
+        _day_second = index * day_second
+        i0 = int((_date + _day_second - _meta_starttime) * frequency) + 1
+
+        # if self.verbose:
+        #     print(f"index = {index}")
+        #     print(f"i0 = {i0}")
+        #     print(f"_date = {_date}")
+        #     print(f"_day_second = {_day_second}")
+        #     print(f"_meta_starttime = {_meta_starttime}")
 
         if i0 < 0 or i0 >= len(trace.data):
             if self.verbose:
@@ -626,22 +552,15 @@ class TremorData:
         # Ensuring data length for one day downloaded is not over 24 * 3600 * frequency
         i1 = int(24 * 3600 * frequency)
         if (i0 + i1) > len(trace):
+            print(f"i0 + i1 : {i0 + i1}")
+            print(f"len(trace) : {len(trace)}")
             i1 = len(trace)
         else:
             i1 += i0
 
-        # Process frequency bands
-        # Integrate velocity to displacement
-        data_i = cumtrapz(trace, dx=1.0 / frequency, initial=0)
-        data_i -= data_i[i0]
-
         start_time = st.traces[0].meta["starttime"]
         if sds_dir is None:
-            start_time = st.traces[0].meta["starttime"] + timedelta(
-                seconds=(i0 + 1) / frequency
-            )
-
-        print(f"Start time : {start_time}")
+            start_time = start_time + timedelta(seconds=(i0 + 1) / frequency)
 
         # Round start time to the nearest 10 min increment
         start_time_day = UTCDateTime(
@@ -652,8 +571,20 @@ class TremorData:
             start_time_day + int(np.round((start_time - start_time_day) / 600)) * 600
         )
 
+        # print(f"Start time : {start_time}")
+
         n = 60 * 10 * frequency  # Number of samples in 10 minutes
         m = (i1 - i0) // n  # number of windows
+
+        # print(f"i1 : {i1}")
+        # print(f"i0 : {i0}")
+        # print(f"n : {n}")
+        # print(f"Number of windows : {m}")
+
+        # Process frequency bands
+        # Integrate velocity to displacement
+        data_i = cumtrapz(trace, dx=1.0 / frequency, initial=0)
+        data_i -= data_i[i0]
 
         # Apply filters and remove filter response
         _datas = []  # Trace data
@@ -700,7 +631,7 @@ class TremorData:
 
         data_dsar, column_dsar = compute_dsar(
             _data_is,
-            ratio_names=self.RATIO_NAMES,
+            ratio_names=RATIO_NAMES,
             m=m,
             n=n,
             outliers=outliers,
