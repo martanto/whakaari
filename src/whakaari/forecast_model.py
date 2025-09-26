@@ -25,6 +25,7 @@ from tsfresh.utilities.dataframe_functions import impute
 from tsfresh.feature_extraction.settings import ComprehensiveFCParameters
 from functools import partial
 from multiprocessing import Pool
+import matplotlib.dates as mdates
 
 
 class ForecastModel:
@@ -407,7 +408,7 @@ class ForecastModel:
             p.join()
 
         # free memory
-        del feature_matrix
+        # del feature_matrix
         gc.collect()
         self._collect_features()
 
@@ -545,7 +546,7 @@ class ForecastModel:
                 f"❌ Feature matrix is empty. Tremor data start date is {start_date}. Forecast period is {self.start_date_forecast} - {self.end_date_forecast}"
             )
 
-        del fmi, ysi, fma, ysa
+        # del fmi, ysi, fma, ysa
         self.start_date_previous = start_date
         self.end_date_previous = end_date
         self.feature_matrix = _feature_matrix
@@ -731,7 +732,7 @@ class ForecastModel:
 
         # memory management
         if len(run_predictions) > 0:
-            del feature_matrix
+            # del feature_matrix
             gc.collect()
 
         return forecast
@@ -822,6 +823,7 @@ class ForecastModel:
             )
 
         # predict on hires features
+        # load from consensus file
         label_vector = _fm.forecast(
             start_date, end_date, recalculate, model_path=self.model_dir, n_jobs=n_jobs
         )
@@ -836,6 +838,41 @@ class ForecastModel:
             )
 
         return label_vector
+
+    def _new_plot_hires_forecast(self, df, filename):
+        new_df = df.resample("1h").mean()
+        ci = self._compute_confidence_interval(df["consensus"])
+
+        fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(10, 2.5))
+
+        ax.plot(df.index, df["consensus"], color='black', linewidth=1, label='Consensus',
+                alpha=0.2)
+        ax.plot(new_df.index, new_df["consensus"], color='k', linewidth=1,
+                label='Resampled 1D')
+
+        ax.fill_between(df.index, (df["consensus"] - ci), (df["consensus"] + ci),
+                        color="gray", alpha=0.2)
+        ax.fill_between(df.index, 0, 1.0, where=(df["consensus"] > 0.7), color='red',
+                        alpha=0.3, label='Forecast', zorder=-3)
+
+        ax.set_ylim(0, 1.0)
+        ax.set_xlim(df.index[0], df.index[-1])
+
+        ax.axhline(y=0.7, color='k', linestyle='--', linewidth=1.5, label='Threshold')
+        ax.set_ylabel('Consensus', fontsize=8)
+        ax.tick_params(labelsize=8)
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+
+        ax.axvline(datetime.strptime("2025-05-18", '%Y-%m-%d'), color='red',
+                   linestyle='--', label="Eruption")
+        ax.legend(loc='upper left', ncol=2, fontsize=8, frameon=False)
+
+        for label in ax.get_xticklabels(which="major"):
+            label.set(rotation=15, horizontalalignment="right")
+
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300)
 
     def _plot_hires_forecast(
         self,
@@ -903,10 +940,10 @@ class ForecastModel:
         ci = self._compute_confidence_interval(y)
 
         ax.fill_between(time_index, (y - ci), (y + ci), color="c", zorder=5, alpha=0.3)
-        ax_ = ax.twinx()
-        ax_.set_ylabel("RSAM [$\mu$m s$^{-1}$]")
-        ax_.set_ylim([0, 5])
-        ax_.plot(time_index_rsam, rsam.values * 1.0e-3, "k-", lw=0.75)
+        # ax_ = ax.twinx()
+        # ax_.set_ylabel("RSAM [$\mu$m s$^{-1}$]")
+        # ax_.set_ylim([0, 5])
+        # ax_.plot(time_index_rsam, rsam.values * 1.0e-3, "k-", lw=0.75)
 
         for tii, yi in zip(time_index, y):
             if yi > threshold:
@@ -919,7 +956,7 @@ class ForecastModel:
 
         ax.plot([], [], "r--", label="eruption")
         ax.fill_between([], [], [], color="y", label="eruption forecast")
-        ax.plot([], [], "k-", lw=0.75, label="RSAM")
+        # ax.plot([], [], "k-", lw=0.75, label="RSAM")
 
         ax.legend(loc=2, ncol=2)
 
@@ -974,7 +1011,7 @@ class ForecastModel:
         ax.set_xticklabels(label_xts)
 
         ax.set_xlim(xlim)
-        ax_.set_xlim(xlim)
+        # ax_.set_xlim(xlim)
 
         bbox = dict(boxstyle="round", facecolor="wheat", alpha=0.5)
 
@@ -1103,7 +1140,7 @@ class ForecastModel:
                 feature_matrix = feature_matrix_preloaded[
                     feature_matrix_preloaded.index.isin(label_1, level=0)
                 ]
-                del feature_matrix_preloaded, label_1, label_2, label_3
+                # del feature_matrix_preloaded, label_1, label_2, label_3
 
             else:
                 # calculate new features and add to existing saved feature matrix
@@ -1143,7 +1180,7 @@ class ForecastModel:
                             [_feature_matrix_preloaded, _feature_matrix_new]
                         )
 
-                        del _feature_matrix_new
+                        # del _feature_matrix_new
 
                         # sort new updated feature matrix and save (replace existing one)
                         feature_matrix.sort_index(inplace=True)
@@ -1173,7 +1210,7 @@ class ForecastModel:
                     feature_matrix.index.isin(label_1, level=0)
                 ]
                 #
-                del feature_matrix_preloaded, label_1, label_2, label_3
+                # del feature_matrix_preloaded, label_1, label_2, label_3
 
         else:
             ## create feature matrix from scratch
@@ -1218,7 +1255,7 @@ class ForecastModel:
                     feature_matrix, feature_file, index=True, index_label="time"
                 )
                 # end working section
-                del fm_new
+                # del fm_new
             else:
                 year = start_date.year
                 feature_file = self._feature_file(data_stream, year)

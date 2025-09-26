@@ -6,8 +6,8 @@ def main():
     tremor_data = TremorData(
         station="OJN",
         data_dir=os.getcwd(),
-        eruptive_file=r"D:\Projects\whakaari\input\OJN_eruptive_periods.txt",
-        n_jobs=4,
+        eruptive_file=r"D:\Project\whakaari\input\OJN_eruptive_periods.txt",
+        n_jobs=16,
         verbose=True,
     )
 
@@ -23,8 +23,8 @@ def main():
 
     tremor_data.update(
         datetime_start="2025-01-01 00:00:00",
-        datetime_end="2025-05-28 23:59:59",
-        sds_dir=r"D:\Data\OJN",
+        datetime_end="2025-07-06 23:59:59",
+        sds_dir=r"G:\OJN",
     )
 
 
