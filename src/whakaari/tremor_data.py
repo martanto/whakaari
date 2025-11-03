@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 import shutil
 import whakaari
@@ -28,6 +26,10 @@ from whakaari.utils import (
     compute_dsar,
     save_dataframe,
 )
+
+import warnings
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
 
 class TremorData:
@@ -770,7 +772,6 @@ class TremorData:
                 self.df["log_zsc2_" + col] = np.log10(self.df["log_zsc2_" + col])
                 self.df["log_zsc2_" + col][0] = self.df["log_zsc2_" + col][1]
             if self._check_transform("diff_zsc2_" + col):
-
                 # log data
                 dt = np.log10(self.df[col]).replace([np.inf, -np.inf], np.nan).dropna()
 

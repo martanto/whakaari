@@ -352,6 +352,7 @@ class ForecastModel:
             use_only_features = [
                 df for df in self.use_only_features if df in feature_matrix.columns
             ]
+
             feature_matrix = feature_matrix[use_only_features]
             number_of_significant_features = len(use_only_features) + 1
 
@@ -784,7 +785,7 @@ class ForecastModel:
         if save is None:
             save = os.path.join(
                 self.plot_dir,
-                f"hires_forecast_{self.station}_{start_date}-{end_date}.png",
+                f"hires_forecast_{self.classifier}_{self.station}_{start_date}-{end_date}.png",
             )
 
         if n_jobs is not None:
@@ -845,28 +846,56 @@ class ForecastModel:
 
         fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(10, 2.5))
 
-        ax.plot(df.index, df["consensus"], color='black', linewidth=1, label='Consensus',
-                alpha=0.2)
-        ax.plot(new_df.index, new_df["consensus"], color='k', linewidth=1,
-                label='Resampled 1D')
+        ax.plot(
+            df.index,
+            df["consensus"],
+            color="black",
+            linewidth=1,
+            label="Consensus",
+            alpha=0.2,
+        )
+        ax.plot(
+            new_df.index,
+            new_df["consensus"],
+            color="k",
+            linewidth=1,
+            label="Resampled 1D",
+        )
 
-        ax.fill_between(df.index, (df["consensus"] - ci), (df["consensus"] + ci),
-                        color="gray", alpha=0.2)
-        ax.fill_between(df.index, 0, 1.0, where=(df["consensus"] > 0.7), color='red',
-                        alpha=0.3, label='Forecast', zorder=-3)
+        ax.fill_between(
+            df.index,
+            (df["consensus"] - ci),
+            (df["consensus"] + ci),
+            color="gray",
+            alpha=0.2,
+        )
+        ax.fill_between(
+            df.index,
+            0,
+            1.0,
+            where=(df["consensus"] > 0.7),
+            color="red",
+            alpha=0.3,
+            label="Forecast",
+            zorder=-3,
+        )
 
         ax.set_ylim(0, 1.0)
         ax.set_xlim(df.index[0], df.index[-1])
 
-        ax.axhline(y=0.7, color='k', linestyle='--', linewidth=1.5, label='Threshold')
-        ax.set_ylabel('Consensus', fontsize=8)
+        ax.axhline(y=0.7, color="k", linestyle="--", linewidth=1.5, label="Threshold")
+        ax.set_ylabel("Consensus", fontsize=8)
         ax.tick_params(labelsize=8)
         ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
 
-        ax.axvline(datetime.strptime("2025-05-18", '%Y-%m-%d'), color='red',
-                   linestyle='--', label="Eruption")
-        ax.legend(loc='upper left', ncol=2, fontsize=8, frameon=False)
+        ax.axvline(
+            datetime.strptime("2025-05-18", "%Y-%m-%d"),
+            color="red",
+            linestyle="--",
+            label="Eruption",
+        )
+        ax.legend(loc="upper left", ncol=2, fontsize=8, frameon=False)
 
         for label in ax.get_xticklabels(which="major"):
             label.set(rotation=15, horizontalalignment="right")
@@ -1074,6 +1103,7 @@ class ForecastModel:
             print(f"end_date - start_date : {end_date-start_date}")
             print(f"self.dt : {self.dt}")
             print(f"Nw floored : {ceiled}")
+            print(f"number_of_windows : {number_of_windows}")
             print("---- Features Extracted ---", end="\n\n")
 
         # max number of construct windows per iteration (6*24*30 windows: ~ a month of hires, overlap of 1.)
@@ -1272,6 +1302,12 @@ class ForecastModel:
                 columns=["label"],
                 index=feature_matrix.index,
             )
+
+            vector_file = os.path.join(
+                self.feature_dir, f"label_{data_stream}_{self.station}.csv"
+            )
+            label_vector.to_csv(vector_file)
+
             gc.collect()
             return feature_matrix, label_vector
 

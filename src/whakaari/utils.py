@@ -401,6 +401,17 @@ def train_one_model(
     method,
     random_state,
 ):
+    model, grid = get_classifier(classifier)
+
+    # random_state is the same with classifier_index
+    prefix = type(model).__name__
+    fl = os.path.join(model_dir, f"{prefix}_{random_state:04d}.pkl")
+
+    # check if model has already been trained
+    if os.path.isfile(fl) and not retrain:
+        print(f"Model already trained at: {fl}")
+        return
+
     # undersample data
     rus = RandomUnderSampler(method, random_state=random_state + random_seed)
     fmt, yst = rus.fit_resample(feature_matrix, label_vector)
@@ -418,23 +429,17 @@ def train_one_model(
             fp.write("{:4.3e} {:s}\n".format(pv, f))
 
     # get sklearn training objects
-    ss = ShuffleSplit(
+    shuffle_split = ShuffleSplit(
         n_splits=5, test_size=0.25, random_state=random_state + random_seed
     )
-    model, grid = get_classifier(classifier)
-
-    # check if model has already been trained
-    pref = type(model).__name__
-    fl = "{:s}/{:s}_{:04d}.pkl".format(model_dir, pref, random_state)
-    if os.path.isfile(fl) and not retrain:
-        return
 
     # train and save classifier
     model_cv = GridSearchCV(
-        model, grid, cv=ss, scoring="balanced_accuracy", error_score=np.nan
+        model, grid, cv=shuffle_split, scoring="balanced_accuracy", error_score=np.nan
     )
     model_cv.fit(fmt, yst)
     _ = joblib.dump(model_cv.best_estimator_, fl, compress=3)
+    print(f"Model trained at: {fl}")
 
 
 def predict_one_model(feature_matrix, model_path, _flp):

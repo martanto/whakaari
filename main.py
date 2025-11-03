@@ -1,6 +1,8 @@
 from whakaari import TremorData
 import os
+import warnings
 
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
 def main():
     tremor_data = TremorData(
@@ -23,8 +25,8 @@ def main():
 
     tremor_data.update(
         datetime_start="2025-01-01 00:00:00",
-        datetime_end="2025-07-06 23:59:59",
-        sds_dir=r"G:\OJN",
+        datetime_end="2025-08-24 23:59:59",
+        sds_dir=r"G:\OJN\Converted\SDS",
     )
 
 
