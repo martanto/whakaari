@@ -2,7 +2,7 @@
 from whakaari import ForecastModel
 import warnings
 
-warnings.filterwarnings("ignore", module="tsfresh")
+warnings.simplefilter("ignore")
 
 
 #%%
@@ -22,7 +22,7 @@ def main(
         end_date=end_date_train,
         window=2.0,
         overlap=0.75,
-        look_forward=3.0,
+        look_forward=2.0,
         eruptive_file=r"D:\Project\whakaari\input\OJN_eruptive_periods.txt",
         tremor_data_file=r"D:\Project\whakaari\output\OJN_tremor_data.csv",
         data_streams=data_streams,
@@ -57,9 +57,9 @@ def main(
 if __name__ == "__main__":
     main(
         start_date_train = "2025-01-01",
-        end_date_train = "2025-07-21",
-        start_date_forecast= "2025-07-22",
+        end_date_train = "2025-03-31",
+        start_date_forecast= "2025-04-01",
         end_date_forecast= "2025-08-22",
         station = "OJN",
-        classifier = "NN"
+        classifier = "RF"
     )
