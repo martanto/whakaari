@@ -57,8 +57,8 @@ def main(
 if __name__ == "__main__":
     main(
         start_date_train = "2025-01-01",
-        end_date_train = "2025-03-31",
-        start_date_forecast= "2025-04-01",
+        end_date_train = "2025-07-26",
+        start_date_forecast= "2025-07-27",
         end_date_forecast= "2025-08-22",
         station = "OJN",
         classifier = "RF"

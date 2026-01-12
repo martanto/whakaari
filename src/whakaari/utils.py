@@ -152,20 +152,21 @@ def outlier_detection(data: List, outlier_degree: float = 0.5) -> Tuple[bool, in
         outlier (bool): Is the maximum of the data considered an outlier?
         max_idx (int): The index of the maximum of the data considered an outlier.
     """
-    mean = np.mean(data)
     std = np.std(data)
     max_idx = np.argmax(data)  # get index of maximum value
 
+    if std == 0:
+        return True, int(max_idx)
+
+    mean = np.mean(data)
+
     # Compute Z-score
-    z_score = (data[max_idx] - mean) / std
-
     # Determine if an outlier
+    z_score = (data[max_idx] - mean) / std
     if z_score > 10**outlier_degree:
-        outlier = True
-    else:
-        outlier = False
+        return True, int(max_idx)
 
-    return outlier, int(max_idx)
+    return False, int(max_idx)
 
 
 def find_outliers(data: List, n: int, m: int) -> Tuple[List[bool], List[int]]:

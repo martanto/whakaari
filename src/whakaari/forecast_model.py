@@ -4,7 +4,6 @@ import os, gc, pathlib
 import pandas as pd
 import numpy as np
 import sys
-import traceback
 from matplotlib import pyplot as plt
 from fnmatch import fnmatch
 from glob import glob
@@ -335,7 +334,10 @@ class ForecastModel:
             _ = [os.remove(fl) for fl in glob("{:s}/*".format(self.model_dir))]
 
         # get feature matrix and label vector
-        feature_matrix, label_vector = self._load_data()
+        feature_matrix, label_vector = self._load_data(
+            start_date=start_date,
+            end_date=end_date,
+        )
 
         if self.verbose:
             print(f"Feature Matrix dimension : {feature_matrix.shape}")
@@ -452,7 +454,7 @@ class ForecastModel:
 
     def _load_data(
         self, start_date: str = None, end_date: str = None, year: int = None
-    ) -> (pd.DataFrame, pd.DataFrame):
+    ):
         # Return pre loaded
         if start_date is None:
             start_date: datetime = self.start_date_train
@@ -499,7 +501,7 @@ class ForecastModel:
             date_range.insert(0, start_date)
             date_range.append(end_date)
 
-        _feature_matrix = []
+        _feature_matrices = []
         ysa = []
 
         for data_stream in self.data_streams:
@@ -516,8 +518,8 @@ class ForecastModel:
 
                 fma.append(fmi)
                 ysa.append(ysi)
-            fma = pd.concat(fma)
-            _feature_matrix.append(fma)
+            fma_df = pd.concat(fma)
+            _feature_matrices.append(fma_df)
 
             if self.debug:
                 _feature_matrix_dir = os.path.join(self.output_dir, "_feature_matrix")
@@ -528,7 +530,7 @@ class ForecastModel:
                     _feature_matrix_dir, _feature_matrix_filename
                 )
 
-                fma.to_csv(_feature_matrix_path)
+                fma_df.to_csv(_feature_matrix_path)
 
                 print(f"🔨 Feature Matrix saved to {_feature_matrix_path}")
 
@@ -537,27 +539,28 @@ class ForecastModel:
             raise ValueError(f"_load_data > ysa : ysa value is {len(ysa)}")
 
         if self.debug:
-            print(_feature_matrix)
+            print(_feature_matrices)
 
         _label_vector = pd.concat(ysa)
-        _feature_matrix = pd.concat(_feature_matrix, axis=1, sort=False)
+        _feature_matrices = pd.concat(_feature_matrices, axis=1, sort=False)
 
-        if len(_feature_matrix) == 0:
+        if len(_feature_matrices) == 0:
             raise ValueError(
-                f"❌ Feature matrix is empty. Tremor data start date is {start_date}. Forecast period is {self.start_date_forecast} - {self.end_date_forecast}"
+                f"❌ Feature matrix is empty. Tremor data start date is {start_date}. "
+                f"Training period is {self.start_date_train} - {self.end_date_train}"
             )
 
         # del fmi, ysi, fma, ysa
         self.start_date_previous = start_date
         self.end_date_previous = end_date
-        self.feature_matrix = _feature_matrix
+        self.feature_matrix = _feature_matrices
         self.label_vector = _label_vector
 
         if self.debug:
-            print(f"🔨 Length of feature matrix: {len(_feature_matrix)}")
+            print(f"🔨 Length of feature matrix: {len(_feature_matrices)}")
             print(f"🔨 Length of label vector: {len(_label_vector)}")
 
-        return _feature_matrix, _label_vector
+        return _feature_matrices, _label_vector
 
     def forecast(
         self,
@@ -745,6 +748,7 @@ class ForecastModel:
         recalculate: bool = True,
         save: str = None,
         root: str = None,
+        overlap: float = 1.0,
         nz_timezone: bool = False,
         n_jobs: int = None,
         threshold: float = 0.8,
@@ -800,7 +804,7 @@ class ForecastModel:
             start_date=start_date,
             end_date=end_date,
             window=self.window,
-            overlap=1.0,
+            overlap=overlap,
             look_forward=self.look_forward,
             eruptive_file=self.eruptive_file,
             tremor_data_file=self.tremor_data_file,

@@ -560,7 +560,7 @@ class TremorData:
         else:
             i1 += i0
 
-        start_time = st.traces[0].meta["starttime"]
+        start_time = _date + timedelta(days=index)
         if sds_dir is None:
             start_time = start_time + timedelta(seconds=(i0 + 1) / frequency)
 

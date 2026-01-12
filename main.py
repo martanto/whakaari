@@ -9,7 +9,7 @@ def main():
         station="OJN",
         data_dir=os.getcwd(),
         eruptive_file=r"D:\Project\whakaari\input\OJN_eruptive_periods.txt",
-        n_jobs=16,
+        n_jobs=10,
         verbose=True,
     )
 
@@ -17,7 +17,7 @@ def main():
         "OJN": {
             "client_name": "GEONET",
             "client_url": "https://service.geonet.org.nz",
-            "channel": "EHN",
+            "channel": "EHZ",
             "network": "VG",
             "location": "00",
         },
