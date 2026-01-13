@@ -19,7 +19,7 @@ from .utils import (
     classifier_codes,
 )
 from datetime import datetime, timedelta
-from tsfresh import extract_features
+from tsfresh import extract_features, extract_relevant_features
 from tsfresh.utilities.dataframe_functions import impute
 from tsfresh.feature_extraction.settings import ComprehensiveFCParameters
 from functools import partial
@@ -340,6 +340,8 @@ class ForecastModel:
         )
 
         if self.verbose:
+            print(f"Feature matrix start date: {feature_matrix.index[0]}")
+            print(f"Feature matrix end date: {feature_matrix.index[-1]}")
             print(f"Feature Matrix dimension : {feature_matrix.shape}")
             print(f"Label Vector dimension : {label_vector.shape}")
 
@@ -514,6 +516,7 @@ class ForecastModel:
                 )
                 i += 1
                 if i == 2:
+                    print(f"Pass data stream: {data_stream}")
                     pass
 
                 fma.append(fmi)
@@ -619,29 +622,30 @@ class ForecastModel:
         if model_path is not None:
             self._detect_model(model_path=model_path)
 
-        model, classifier = get_classifier(self.classifier)
+        method, classifier = get_classifier(self.classifier)
 
         if self.debug:
-            print(f"🔨 Model: {model}")
+            print(f"🔨 Model: {method}")
             print(f"🔨 Classifier: {classifier}")
 
         # logic to determine which models need to be run and which to be
         # read from disk
-        prefix = type(model).__name__
-        models = glob(os.path.join(model_path, f"{prefix}_*.pkl"))
+        prefix = type(method).__name__
+        model_files = glob(os.path.join(model_path, f"{prefix}_*.pkl"))
 
         if self.debug:
-            print(f"🔨 Models found: {len(models)}", end="\n\n")
+            print(f"🔨 Model Files found: {len(model_files)}", end="\n\n")
 
         run_predictions = []
-        ys = []
+        y_dataframes = []
         start_date_list = []
 
         # create a prediction for each model
-        for model in models:
+        for model_file in model_files:
             # change location
-            prediction_model = model.replace(model_path, self.prediction_dir)
-            # update filetype
+            prediction_model = model_file.replace(model_path, self.prediction_dir)
+
+            # update filename if year is defined
             prediction_model_path = prediction_model.replace(
                 ".pkl", "{:s}.{:s}".format(year_str, self.savefile_type)
             )
@@ -656,30 +660,30 @@ class ForecastModel:
                 if recalculate:
                     # delete predictions to be recalculated
                     os.remove(prediction_model_path)
-                    run_predictions.append([model, prediction_model_path])
+                    run_predictions.append([model_file, prediction_model_path])
                     start_date_list.append(self.start_date_forecast)
                 else:
                     # load an existing prediction
-                    y = load_dataframe(
+                    y_df = load_dataframe(
                         prediction_model_path,
                         index_col=0,
                         parse_dates=["time"],
                         infer_datetime_format=True,
                     )
                     # check if prediction spans the requested interval
-                    if y.index[-1] < self.start_date_forecast:
-                        run_predictions.append([model, prediction_model_path])
-                        start_date_list.append(y.index[-1])
+                    if y_df.index[-1] < self.start_date_forecast:
+                        run_predictions.append([model_file, prediction_model_path])
+                        start_date_list.append(y_df.index[-1])
 
                         if self.debug:
                             print(f"🔨 Predictions found: {len(run_predictions)}")
                     else:
-                        ys.append(y)
+                        y_dataframes.append(y_df)
             else:
-                # if self.debug:
-                #     print(f"🔨 Prediction model not found: {prediction_model_path}")
+                if self.debug:
+                    print(f"🔨 Prediction model not found: {prediction_model_path}")
 
-                run_predictions.append([model, prediction_model_path])
+                run_predictions.append([model_file, prediction_model_path])
                 start_date_list.append(self.start_date_forecast)
 
         if len(start_date_list) > 0:
@@ -687,6 +691,9 @@ class ForecastModel:
 
         # generate new predictions
         if len(run_predictions) > 0:
+            if self.debug:
+                print(f"🔨 Len run_predictions = {len(run_predictions)}")
+
             # load feature matrix
             feature_matrix, _ = self._load_data(
                 start_date, self.end_date_forecast, year
@@ -718,20 +725,20 @@ class ForecastModel:
                         f'forecasting {year:d}: [{"#" * round(50 * cf) + "-" * round(50 * (1 - cf))}] {100. * cf:.2f}%\r',
                         end="",
                     )
-                ys.append(y)
+                y_dataframes.append(y)
 
             if n_jobs > 1:
                 p.close()
                 p.join()
 
         # condense data frames and write output
-        ys = pd.concat(ys, axis=1, sort=False)
+        y_concat_df = pd.concat(y_dataframes, axis=1, sort=False)
         consensus = np.mean(
-            [ys[col].values for col in ys.columns if "pred" in col], axis=0
+            [y_concat_df[col].values for col in y_concat_df.columns if "pred" in col], axis=0
         )
 
         # save consensus file
-        forecast = pd.DataFrame(consensus, columns=["consensus"], index=ys.index)
+        forecast = pd.DataFrame(consensus, columns=["consensus"], index=y_concat_df.index)
         save_dataframe(forecast, consensus_file, index=True, index_label="time")
 
         # memory management
@@ -817,6 +824,11 @@ class ForecastModel:
             verbose=self.verbose,
             debug=self.debug,
         )
+
+        print(f"self.start_date: {self.start_date}")
+        print(f"_fm.start_date: {_fm.start_date}")
+
+        # raise ValueError("CHECK")
 
         _fm.compute_only_features = list(
             set([ft.split("__")[1] for ft in self._collect_features()[0]])
@@ -1082,7 +1094,7 @@ class ForecastModel:
         start_date: datetime,
         end_date: datetime,
         data_stream,
-    ) -> (pd.DataFrame, pd.DataFrame):
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
         Extract features from windowed data.
 
@@ -1294,10 +1306,10 @@ class ForecastModel:
                 year = start_date.year
                 feature_file = self._feature_file(data_stream, year)
                 # generate dataframe
-                fm = self._construct_windows_extract_feature(
+                feature_matrix = self._construct_windows_extract_feature(
                     number_of_windows, start_date, data_stream
                 )
-                save_dataframe(fm, feature_file, index=True, index_label="time")
+                save_dataframe(feature_matrix, feature_file, index=True, index_label="time")
 
         # Label vector corresponding to data windows
         if len(feature_matrix) > 0:
@@ -1334,6 +1346,11 @@ class ForecastModel:
             # drop features if relevant
             _ = [cfp.pop(df) for df in self.drop_features if df in list(cfp.keys())]
 
+        # construct_windows/extract_features for subsets
+        df, wd = self._construct_windows(
+            number_of_windows, start_date, data_stream, index=index
+        )
+
         kw = {
             "column_id": "id",
             "n_jobs": self.n_jobs,
@@ -1341,11 +1358,6 @@ class ForecastModel:
             "impute_function": impute,
             "show_warnings": self.show_warnings,
         }
-
-        # construct_windows/extract_features for subsets
-        df, wd = self._construct_windows(
-            number_of_windows, start_date, data_stream, index=index
-        )
 
         # extract features and generate feature matrixs
         feature_matrix = self._extract_features_x(df, **kw)
@@ -1358,9 +1370,9 @@ class ForecastModel:
 
             _start_date = start_date.strftime("%Y-%m-%d")
             _save_path = os.path.join(
-                _path, f"{self.station}_{data_stream}_{_start_date}.xlsx"
+                _path, f"{self.station}_{data_stream}_{_start_date}.csv"
             )
-            feature_matrix.to_excel(_save_path)
+            feature_matrix.to_csv(_save_path)
 
         return feature_matrix
 
@@ -1443,6 +1455,9 @@ class ForecastModel:
             )
 
         # tsfresh extract features
+        # return extract_relevant_features(
+        #     df, **kw
+        # )
         return extract_features(df, **kw)
 
     def _get_label(self, ts):
